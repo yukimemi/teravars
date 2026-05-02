@@ -1,6 +1,6 @@
 [package]
 name = "teravars"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["yukimemi <yukimemi@gmail.com>"]
@@ -15,7 +15,7 @@ keywords = ["tera", "template", "toml", "config"]
 default = ["std-helpers"]
 std-helpers = []
 shell = []
-merge = ["dep:glob"]
+merge = []
 tracing = ["dep:tracing"]
 
 [dependencies]
@@ -27,7 +27,6 @@ thiserror = "2"
 whoami = "1"
 
 tracing = { version = "0.1", optional = true }
-glob = { version = "0.3", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1"
