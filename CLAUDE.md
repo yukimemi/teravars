@@ -112,17 +112,33 @@ user before reverting any of them.
 **Practice TDD.** Red-green-refactor.
 
 ```bash
+cargo make setup                            # one-time on clone: hook + apm
 cargo test                                  # default features
 cargo test --all-features                   # incl. shell, merge, tracing
 cargo test --no-default-features            # core only
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo make check                            # all of the above (pre-push gate)
-cargo make hook-install                     # install pre-push hook (one-time)
 ```
+
+`cargo make setup` is `hook-install` + `apm-install` — runs once
+per clone. Individual tasks:
+
+- `cargo make hook-install` — wires `.git/hooks/pre-push` to
+  `cargo make check`.
+- `cargo make apm-install` — runs `apm install`, which compiles
+  the [renri] skill (declared in `apm.yml`) into
+  `.github/skills/renri/SKILL.md`. teravars itself is a Rust
+  library and ships no agent primitives, but contributors who use
+  AI agents to develop it benefit from having renri available
+  (parallel-branch worktrees, jj workspaces). Pinned to
+  `yukimemi/renri#v0.1.5` in `apm.yml`; lockfile in
+  `apm.lock.yaml`.
 
 `cargo make check` mirrors CI exactly. The pre-push hook runs it,
 so failed checks block push.
+
+[renri]: https://github.com/yukimemi/renri
 
 ## Resilience principle
 
