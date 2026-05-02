@@ -128,10 +128,14 @@ per clone. Individual tasks:
   `cargo make check`.
 - `cargo make apm-install` — runs `apm install`, which compiles
   the [renri] skill (declared in `apm.yml`) into
-  `.github/skills/renri/SKILL.md`. teravars itself is a Rust
-  library and ships no agent primitives, but contributors who use
-  AI agents to develop it benefit from having renri available
-  (parallel-branch worktrees, jj workspaces). Pinned to
+  `.claude/skills/` + `.gemini/skills/` + `.github/skills/`.
+  **Requires the [APM](https://github.com/microsoft/apm) CLI on
+  `PATH`** — `scoop install apm` (Windows),
+  `brew install microsoft/apm/apm` (macOS), `pip install apm-cli`,
+  or `curl -sSL https://aka.ms/apm-unix | sh`. teravars itself is
+  a Rust library and ships no agent primitives, but contributors
+  who use AI agents to develop it benefit from having renri
+  available (parallel-branch worktrees, jj workspaces). Pinned to
   `yukimemi/renri#v0.1.5` in `apm.yml`; lockfile in
   `apm.lock.yaml`.
 
