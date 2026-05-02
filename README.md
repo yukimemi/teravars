@@ -4,25 +4,40 @@
 > configs. Extracted from the duplicated patterns in
 > [shun] / [rvpm] / [todoke] / [yui] / [spyrun].
 
-**Status: empty. Roadmap only — see [ROADMAP.md](./ROADMAP.md).**
+**Status: 0.1.0 — core API shipped. Migration of the 5 sibling tools
+is the next step; see [ROADMAP.md](./ROADMAP.md).**
 
-## What it'll do
+## Quickstart
 
 ```rust
-use teravars::Engine;
+use teravars::{Context, Engine, extract_vars, resolve, system_context};
 
-let mut engine = Engine::new();          // Tera + standard helpers
 let raw = std::fs::read_to_string("config.toml")?;
+let mut engine = Engine::new();              // Tera + standard helpers
 
-let vars = teravars::extract_vars(&raw)?;
-let resolved = teravars::resolve(&vars, &mut engine)?;
+let mut vars = extract_vars(&raw)?;          // text-based [vars] carve-out
+resolve(&mut vars, &mut engine)?;            // iterate cross-refs to fixpoint
 
-let mut ctx = teravars::system_context();
-ctx.insert_vars(&resolved);
+let mut ctx: Context = system_context();     // system.os/arch/user/host
+ctx.insert("vars", &vars);
 
 let rendered = engine.render(&raw, &ctx)?;
 let cfg: MyConfig = toml::from_str(&rendered)?;
 ```
+
+`resolve` mutates `vars` in place. On non-convergence it returns
+`Err(Error::ResolveNotConverged { .. })` while leaving `vars` in its
+last partially-resolved state — callers that prefer resilience over
+strictness can `if let Err(_)` and continue with what's there.
+
+## Cargo features
+
+| feature       | default | what it adds |
+|---------------|---------|--------------|
+| `std-helpers` | yes     | `env(name, default?)`, `is_windows()`, `is_linux()`, `is_mac()` |
+| `shell`       | no      | `ps()` / `psf()` (Windows), `bash()` / `bashf()` (Unix) |
+| `merge`       | no      | multi-file config loading (yui/shun pattern) — coming next |
+| `tracing`     | no      | emit `tracing` events from internal operations |
 
 The point: today, every yukimemi/* tool that consumes a TOML config
 written by-hand re-implements

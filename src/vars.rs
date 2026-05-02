@@ -2,8 +2,8 @@ use tera::Context;
 use toml::{Table, Value};
 
 use crate::Engine;
-use crate::error::Error;
 use crate::Result;
+use crate::error::Error;
 
 pub const DEFAULT_MAX_RESOLVE_ITERATIONS: usize = 10;
 
@@ -12,7 +12,9 @@ pub fn extract_vars(text: &str) -> Result<Table> {
     if raw.trim().is_empty() {
         return Ok(Table::new());
     }
-    let parsed: Table = raw.parse().map_err(|e: toml::de::Error| Error::Extract(e.to_string()))?;
+    let parsed: Table = raw
+        .parse()
+        .map_err(|e: toml::de::Error| Error::Extract(e.to_string()))?;
     Ok(match parsed.get("vars") {
         Some(Value::Table(t)) => t.clone(),
         _ => Table::new(),
@@ -80,7 +82,12 @@ struct TagScan {
 fn scan_tera_tags(line: &str) -> TagScan {
     const OPENERS: &[&str] = &["if", "for", "block", "macro", "filter", "raw"];
     const CLOSERS: &[&str] = &[
-        "endif", "endfor", "endblock", "endmacro", "endfilter", "endraw",
+        "endif",
+        "endfor",
+        "endblock",
+        "endmacro",
+        "endfilter",
+        "endraw",
     ];
 
     let mut opens = 0;
@@ -122,11 +129,7 @@ pub fn resolve(vars: &mut Table, engine: &mut Engine) -> Result<()> {
     resolve_with_max_iter(vars, engine, DEFAULT_MAX_RESOLVE_ITERATIONS)
 }
 
-pub fn resolve_with_max_iter(
-    vars: &mut Table,
-    engine: &mut Engine,
-    max_iter: usize,
-) -> Result<()> {
+pub fn resolve_with_max_iter(vars: &mut Table, engine: &mut Engine, max_iter: usize) -> Result<()> {
     if vars.is_empty() {
         return Ok(());
     }

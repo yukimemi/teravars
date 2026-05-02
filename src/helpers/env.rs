@@ -25,7 +25,10 @@ mod tests {
     use super::*;
 
     fn args(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]
@@ -35,7 +38,11 @@ mod tests {
         unsafe {
             std::env::set_var("TERAVARS_TEST_ENV", "abc");
         }
-        let v = env_fn(&args(&[("name", Value::String("TERAVARS_TEST_ENV".into()))])).unwrap();
+        let v = env_fn(&args(&[(
+            "name",
+            Value::String("TERAVARS_TEST_ENV".into()),
+        )]))
+        .unwrap();
         assert_eq!(v, Value::String("abc".into()));
     }
 

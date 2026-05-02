@@ -1,0 +1,68 @@
+[tasks.default]
+alias = "check"
+
+[tasks.check]
+description = "Run fmt + clippy + test + lock-check across feature combos (same as CI)"
+dependencies = ["fmt-check", "clippy", "clippy-all", "clippy-none", "test", "test-all", "test-none", "lock-check"]
+
+[tasks.fmt-check]
+description = "Check formatting"
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+[tasks.fmt]
+description = "Apply formatting"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.clippy]
+description = "clippy with default features"
+command = "cargo"
+args = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.clippy-all]
+description = "clippy with --all-features"
+command = "cargo"
+args = ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+[tasks.clippy-none]
+description = "clippy with --no-default-features"
+command = "cargo"
+args = ["clippy", "--locked", "--all-targets", "--no-default-features", "--", "-D", "warnings"]
+
+[tasks.test]
+description = "test with default features"
+command = "cargo"
+args = ["test", "--locked"]
+
+[tasks.test-all]
+description = "test with --all-features"
+command = "cargo"
+args = ["test", "--locked", "--all-features"]
+
+[tasks.test-none]
+description = "test with --no-default-features"
+command = "cargo"
+args = ["test", "--locked", "--no-default-features"]
+
+[tasks.lock-check]
+description = "Verify Cargo.lock is in sync with Cargo.toml"
+command = "cargo"
+args = ["check", "--locked", "--all-targets"]
+
+[tasks.publish-dry]
+description = "Dry-run crates.io publish"
+command = "cargo"
+args = ["publish", "--dry-run", "--allow-dirty"]
+
+[tasks.hook-install]
+description = "Install git pre-push hook that runs 'cargo make check'"
+script_runner = "@duckscript"
+script = '''
+hook_dir = set ".git/hooks"
+hook_file = set "${hook_dir}/pre-push"
+mkdir ${hook_dir}
+hook_content = set "#!/bin/sh\n# Installed by: cargo make hook-install\ncargo make check"
+writefile ${hook_file} ${hook_content}
+echo "Installed pre-push hook -> ${hook_file}"
+'''

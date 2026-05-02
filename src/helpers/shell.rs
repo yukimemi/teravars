@@ -55,14 +55,12 @@ fn bashf_fn(_args: &HashMap<String, Value>) -> Result<Value> {
     Err(Error::msg("bashf() is only available on Unix targets"))
 }
 
-fn required_str<'a>(
-    args: &'a HashMap<String, Value>,
-    key: &str,
-    fname: &str,
-) -> Result<&'a str> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::msg(format!("{fname}(): required argument '{key}' missing or not a string")))
+fn required_str<'a>(args: &'a HashMap<String, Value>, key: &str, fname: &str) -> Result<&'a str> {
+    args.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
+        Error::msg(format!(
+            "{fname}(): required argument '{key}' missing or not a string"
+        ))
+    })
 }
 
 fn run(program: &str, args: &[&str], fname: &str) -> Result<Value> {
