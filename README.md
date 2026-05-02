@@ -4,8 +4,8 @@
 > configs. Extracted from the duplicated patterns in
 > [shun] / [rvpm] / [todoke] / [yui] / [spyrun].
 
-**Status: 0.1.1 — core + multi-file merge shipped. Migration of the 5
-sibling tools is the next step; see [ROADMAP.md](./ROADMAP.md).**
+**Status: 0.1.2 — core + multi-file merge + `include` directive shipped.
+Migration of the 5 sibling tools is the next step; see [ROADMAP.md](./ROADMAP.md).**
 
 ## Quickstart
 
@@ -51,6 +51,45 @@ beforehand if you want skip-on-missing.
 `discover_config_files(dir)` returns the file set in the canonical
 order: `config.toml` first, alphabetical `config.*.toml` next,
 `config.local.toml` last (so the local override always wins).
+
+### `include` directive
+
+Any TOML file processed by `load_merged` may pull in other files:
+
+```toml
+# /etc/myapp/config.toml
+include = [
+  "common.toml",                            # relative to /etc/myapp/
+  "{{ system.host }}.toml",                 # Tera-rendered before path resolution
+  "{{ system.cwd }}/dev-overrides.toml",    # cwd-relative if you want it
+]
+
+[vars]
+api_url = "https://api.{{ vars.global_host }}"   # global_host comes from common.toml
+```
+
+Semantics:
+
+- Includes are loaded **before** the file that declares them, so the
+  declaring file overrides anything it includes (the natural reading
+  of "build on top of these").
+- Paths are **rendered through Tera** with `system.*` and any
+  caller-supplied context in scope, but **not** with `vars` (vars
+  haven't accumulated yet at the point includes resolve).
+- Relative paths resolve against the **directory of the including
+  file**. Use `{{ system.cwd }}` when you want process-cwd-relative.
+- Includes can include further files; the loader detects cycles and
+  returns `Error::IncludeCycle`.
+- The directive itself never appears in the merged result — both
+  root `include` and the entire `[teravars]` namespace are stripped
+  before merging.
+- If both root `include = [...]` and `[teravars] include = [...]`
+  are present in the same file, that's `Error::IncludeConflict`.
+  Pick one form per file.
+
+The `[teravars]` namespace exists as a fallback for the rare case
+where your application config legitimately uses `include` as a
+top-level key for something else.
 
 ## Cargo features
 

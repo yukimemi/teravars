@@ -72,14 +72,14 @@ fn extract_vars_section(text: &str) -> String {
     out
 }
 
-struct TagScan {
-    opens: usize,
-    closes: usize,
-    has_any_tag: bool,
-    unterminated: bool,
+pub(crate) struct TagScan {
+    pub opens: usize,
+    pub closes: usize,
+    pub has_any_tag: bool,
+    pub unterminated: bool,
 }
 
-fn scan_tera_tags(line: &str) -> TagScan {
+pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
     const OPENERS: &[&str] = &["if", "for", "block", "macro", "filter", "raw"];
     const CLOSERS: &[&str] = &[
         "endif",

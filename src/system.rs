@@ -7,6 +7,10 @@ pub struct SystemInfo {
     pub arch: String,
     pub user: String,
     pub host: String,
+    /// Process working directory at the time `system_context()` was called.
+    /// Useful for templating cwd-relative paths, e.g.
+    /// `include = ["{{ system.cwd }}/extras.toml"]`.
+    pub cwd: String,
 }
 
 impl SystemInfo {
@@ -16,6 +20,10 @@ impl SystemInfo {
             arch: std::env::consts::ARCH.to_string(),
             user: whoami::username(),
             host: whoami::fallible::hostname().unwrap_or_default(),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 }
@@ -39,6 +47,7 @@ mod tests {
         assert!(system.get("arch").and_then(|v| v.as_str()).is_some());
         assert!(system.get("user").is_some());
         assert!(system.get("host").is_some());
+        assert!(system.get("cwd").and_then(|v| v.as_str()).is_some());
     }
 
     #[test]

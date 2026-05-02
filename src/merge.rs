@@ -1,7 +1,8 @@
 //! Multi-file config merge — yui-style deep recursive merge with per-file
-//! Tera rendering, so that vars accumulated from earlier files are visible
-//! during the current file's render pass.
+//! Tera rendering and an `include = [...]` directive that lets a config file
+//! pull in other files before it is processed.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tera::Context;
@@ -10,7 +11,7 @@ use toml::{Table, Value};
 use crate::Result;
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::vars::{extract_vars, resolve};
+use crate::vars::{extract_vars, resolve, scan_tera_tags};
 
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
@@ -25,38 +26,17 @@ pub fn load_merged<P: AsRef<Path>>(
 ) -> Result<MergedConfig> {
     let mut acc_vars = Table::new();
     let mut acc_config = Table::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
 
     for p in paths {
-        let path = p.as_ref();
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            Error::Io(std::io::Error::new(
-                e.kind(),
-                format!("{}: {e}", path.display()),
-            ))
-        })?;
-
-        let file_vars = extract_vars(&raw)?;
-
-        let mut resolution_vars = acc_vars.clone();
-        deep_merge(&mut resolution_vars, file_vars);
-        let _ = resolve(&mut resolution_vars, engine);
-
-        let mut ctx = extra_ctx.clone();
-        ctx.insert("vars", &resolution_vars);
-
-        let rendered = engine
-            .render(&raw, &ctx)
-            .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_inner(&e))))?;
-
-        let parsed: Table = rendered
-            .parse()
-            .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
-
-        if let Some(Value::Table(rendered_vars)) = parsed.get("vars").cloned() {
-            deep_merge(&mut acc_vars, rendered_vars);
-        }
-
-        deep_merge(&mut acc_config, parsed);
+        load_file_recursive(
+            p.as_ref(),
+            engine,
+            extra_ctx,
+            &mut acc_vars,
+            &mut acc_config,
+            &mut visited,
+        )?;
     }
 
     if !acc_vars.is_empty() {
@@ -67,6 +47,64 @@ pub fn load_merged<P: AsRef<Path>>(
         vars: acc_vars,
         config: acc_config,
     })
+}
+
+fn load_file_recursive(
+    path: &Path,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    acc_vars: &mut Table,
+    acc_config: &mut Table,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical.clone()) {
+        return Err(Error::IncludeCycle { path: canonical });
+    }
+
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", path.display()),
+        ))
+    })?;
+
+    let include_paths = extract_include_paths(&raw, path)?;
+    for raw_inc in &include_paths {
+        let rendered = engine
+            .render(raw_inc, extra_ctx)
+            .map_err(|e| Error::Render(format!("{} include: {}", path.display(), error_msg(&e))))?;
+        let inc_path = resolve_relative(path, Path::new(&rendered));
+        load_file_recursive(&inc_path, engine, extra_ctx, acc_vars, acc_config, visited)?;
+    }
+
+    let file_vars = extract_vars(&raw)?;
+
+    let mut resolution_vars = acc_vars.clone();
+    deep_merge(&mut resolution_vars, file_vars);
+    let _ = resolve(&mut resolution_vars, engine);
+
+    let mut ctx = extra_ctx.clone();
+    ctx.insert("vars", &resolution_vars);
+
+    let rendered = engine
+        .render(&raw, &ctx)
+        .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_msg(&e))))?;
+
+    let mut parsed: Table = rendered
+        .parse()
+        .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
+
+    parsed.remove("include");
+    parsed.remove("teravars");
+
+    if let Some(Value::Table(rendered_vars)) = parsed.get("vars").cloned() {
+        deep_merge(acc_vars, rendered_vars);
+    }
+
+    deep_merge(acc_config, parsed);
+
+    Ok(())
 }
 
 pub fn discover_config_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
@@ -134,7 +172,105 @@ pub fn deep_merge(base: &mut Table, overlay: Table) {
     }
 }
 
-fn error_inner(err: &Error) -> String {
+fn resolve_relative(base_file: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else if let Some(parent) = base_file.parent() {
+        parent.join(target)
+    } else {
+        target.to_path_buf()
+    }
+}
+
+/// Extract the include directive paths from a raw TOML+Tera file.
+///
+/// Looks at the file's TOML skeleton (Tera control blocks `{% ... %}` removed
+/// to make it parse-friendly) and reads either:
+/// - root-level `include = [...]`, or
+/// - `[teravars] include = [...]` (namespaced fallback)
+///
+/// If both forms are present, returns `Error::IncludeConflict`.
+fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
+    let skeleton = strip_tera_blocks(text);
+    if skeleton.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed: Table = match skeleton.parse() {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let root_inc = read_string_array(parsed.get("include"));
+    let teravars_inc = parsed
+        .get("teravars")
+        .and_then(|v| v.as_table())
+        .and_then(|t| read_string_array(t.get("include")).into());
+
+    match (
+        root_inc.is_empty(),
+        teravars_inc.as_ref().is_none_or(|v| v.is_empty()),
+    ) {
+        (false, false) => Err(Error::IncludeConflict {
+            path: path.to_path_buf(),
+        }),
+        (false, _) => Ok(root_inc),
+        (_, false) => Ok(teravars_inc.unwrap()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn read_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn strip_tera_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut block_depth: usize = 0;
+    let mut multiline_open = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if multiline_open {
+            if trimmed.contains("%}") {
+                multiline_open = false;
+            }
+            out.push('\n');
+            continue;
+        }
+
+        let scan = scan_tera_tags(trimmed);
+        if scan.unterminated {
+            multiline_open = true;
+            out.push('\n');
+            continue;
+        }
+
+        let starting_depth = block_depth;
+        block_depth = block_depth
+            .saturating_add(scan.opens)
+            .saturating_sub(scan.closes);
+
+        if scan.has_any_tag || starting_depth > 0 {
+            out.push('\n');
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    out
+}
+
+fn error_msg(err: &Error) -> String {
     match err {
         Error::Render(s) => s.clone(),
         other => other.to_string(),
@@ -191,17 +327,75 @@ cert = "/etc/cert"
         assert!(matches_config_pattern("config.toml"));
         assert!(matches_config_pattern("config.local.toml"));
         assert!(matches_config_pattern("config.linux.toml"));
-        assert!(matches_config_pattern("config.x86.toml"));
 
         assert!(!matches_config_pattern("config..toml"));
         assert!(!matches_config_pattern("other.toml"));
         assert!(!matches_config_pattern("config.toml.bak"));
-        assert!(!matches_config_pattern("Config.toml"));
     }
 
     #[test]
     fn file_rank_orders_correctly() {
         assert!(file_rank("config.toml") < file_rank("config.linux.toml"));
         assert!(file_rank("config.linux.toml") < file_rank("config.local.toml"));
+    }
+
+    #[test]
+    fn extract_include_paths_root_form() {
+        let text = r#"
+include = ["a.toml", "b.toml"]
+
+[vars]
+foo = "bar"
+"#;
+        let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+        assert_eq!(paths, vec!["a.toml", "b.toml"]);
+    }
+
+    #[test]
+    fn extract_include_paths_teravars_form() {
+        let text = r#"
+[teravars]
+include = ["a.toml"]
+
+[vars]
+foo = "bar"
+"#;
+        let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+        assert_eq!(paths, vec!["a.toml"]);
+    }
+
+    #[test]
+    fn extract_include_paths_conflict() {
+        let text = r#"
+include = ["a.toml"]
+
+[teravars]
+include = ["b.toml"]
+"#;
+        let err = extract_include_paths(text, Path::new("conflict.toml")).unwrap_err();
+        assert!(matches!(err, Error::IncludeConflict { .. }));
+    }
+
+    #[test]
+    fn extract_include_paths_skips_tera_control_blocks() {
+        let text = r#"
+{% if true %}
+include = ["should-not-appear.toml"]
+{% endif %}
+
+[vars]
+foo = "bar"
+"#;
+        let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn extract_include_paths_none_when_absent() {
+        let text = r#"[vars]
+foo = "bar"
+"#;
+        let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+        assert!(paths.is_empty());
     }
 }

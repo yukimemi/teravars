@@ -13,6 +13,14 @@ pub enum Error {
     #[error("vars extraction failed: {0}")]
     Extract(String),
 
+    #[error("include cycle detected at: {path}")]
+    IncludeCycle { path: std::path::PathBuf },
+
+    #[error(
+        "conflicting include directives: both root `include` and `[teravars] include` are set in {path}"
+    )]
+    IncludeConflict { path: std::path::PathBuf },
+
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
 
