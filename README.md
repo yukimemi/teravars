@@ -4,8 +4,9 @@
 > configs. Extracted from the duplicated patterns in
 > [shun] / [rvpm] / [todoke] / [yui] / [spyrun].
 
-**Status: 0.1.2 — core + multi-file merge + `include` directive shipped.
-Migration of the 5 sibling tools is the next step; see [ROADMAP.md](./ROADMAP.md).**
+**Status: 0.1.3 — core + multi-file merge + `include` directive +
+`hash` / `port_offset` filters shipped. Migration of the 5 sibling
+tools is the next step; see [ROADMAP.md](./ROADMAP.md).**
 
 ## Quickstart
 
@@ -95,7 +96,7 @@ top-level key for something else.
 
 | feature       | default | what it adds |
 |---------------|---------|--------------|
-| `std-helpers` | yes     | `env(name, default?)`, `is_windows()`, `is_linux()`, `is_mac()` |
+| `std-helpers` | yes     | functions: `env(name, default?)`, `is_windows()`, `is_linux()`, `is_mac()`. filters: `\| hash`, `\| port_offset(start, range)` |
 | `shell`       | no      | `ps()` / `psf()` (Windows), `bash()` / `bashf()` (Unix) |
 | `merge`       | no      | `load_merged()` / `discover_config_files()` — yui/shun-style multi-file config loading |
 | `tracing`     | no      | emit `tracing` events from internal operations |

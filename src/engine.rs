@@ -76,4 +76,46 @@ mod tests {
         let out = engine.render("{{ custom() }}", &Context::new()).unwrap();
         assert_eq!(out, "ok");
     }
+
+    #[cfg(feature = "std-helpers")]
+    #[test]
+    fn hash_and_port_offset_filters_work_end_to_end() {
+        let mut engine = Engine::new();
+        let mut ctx = Context::new();
+        ctx.insert("branch", "feature/auth");
+
+        // Same input always renders to the same number.
+        let p1 = engine
+            .render(
+                r#"{{ branch | hash | port_offset(start=3000, range=1000) }}"#,
+                &ctx,
+            )
+            .unwrap();
+        let p2 = engine
+            .render(
+                r#"{{ branch | hash | port_offset(start=3000, range=1000) }}"#,
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(p1, p2, "deterministic across renders");
+
+        let n: u64 = p1.parse().expect("port should be a u64-shaped string");
+        assert!(
+            (3000..4000).contains(&n),
+            "port {n} should land in [3000, 4000)"
+        );
+
+        // Different input should produce a different (very likely) port.
+        ctx.insert("branch", "feature/billing");
+        let p3 = engine
+            .render(
+                r#"{{ branch | hash | port_offset(start=3000, range=1000) }}"#,
+                &ctx,
+            )
+            .unwrap();
+        assert_ne!(
+            p1, p3,
+            "different branch → different port (collision unlikely)"
+        );
+    }
 }
