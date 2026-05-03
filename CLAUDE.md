@@ -144,6 +144,59 @@ so failed checks block push.
 
 [renri]: https://github.com/yukimemi/renri
 
+## Working in this repo with AI agents
+
+- **Read-only inspection** (browsing files, answering questions,
+  running read-only commands): no worktree needed; work in the
+  existing checkout.
+- **Any commit-bound change** — new feature, bug fix, refactor,
+  reviewer-feedback fix on an open PR: start with
+  `renri add <branch-name>`, `renri cd <branch-name>`, then commit
+  there. Do **not** edit on the main checkout.
+- **Trivial wording / typo fixes** are the only soft exception, and
+  even then `renri add` is cheap enough that defaulting to it is
+  fine.
+
+### Backend choice — jj-first
+
+This repo is colocated git+jj. `renri add` defaults to **jj**
+(creates a non-colocated jj workspace where `jj` commands work and
+`git` does not — see [jj-vcs/jj#8052](https://github.com/jj-vcs/jj/issues/8052)
+for why secondary colocation isn't possible yet). Stick to the
+default unless there is a specific reason to use git tooling.
+
+```sh
+# In a freshly created worktree (default jj backend):
+jj st                                               # status
+jj describe -m "feat: ..."                          # set @-commit description
+jj git push --bookmark <branch-name> --allow-new    # first push of a new branch
+jj git push --bookmark <branch-name>                # subsequent pushes
+```
+
+`renri --vcs git add <branch-name>` is the override and exists for
+genuine git-CLI-only needs (git submodule, native git2 tooling,
+git-only hooks). Do **not** reach for it out of git-CLI familiarity
+— prefer learning the equivalent jj commands.
+
+### Cleanup after merge
+
+After the PR merges and you've pulled the change into main:
+
+- `renri remove <branch>` — removes a single worktree. Calls
+  `git worktree remove` or `jj workspace forget` as appropriate,
+  then deletes the directory. Refuses to remove the main worktree.
+- `renri prune` — best-effort GC across the repo. Git: removes
+  worktree metadata for already-deleted directories. jj: forgets
+  workspaces whose root path is gone (the missing
+  `jj workspace prune` analog).
+
+Run `renri prune` periodically — especially after manually
+`rm -rf`-ing worktree dirs without going through `renri remove`.
+
+The renri skill (compiled into `.claude/skills/` etc. by
+`cargo make apm-install`) tells the agent the **how**; this section
+is the **when** + the **policy** for this repo.
+
 ## Resilience principle
 
 teravars is a **library** — its job is to surface failures clearly
