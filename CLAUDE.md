@@ -136,7 +136,7 @@ per clone. Individual tasks:
   a Rust library and ships no agent primitives, but contributors
   who use AI agents to develop it benefit from having renri
   available (parallel-branch worktrees, jj workspaces). Pinned to
-  `yukimemi/renri#v0.1.5` in `apm.yml`; lockfile in
+  `yukimemi/renri#main` in `apm.yml`; lockfile in
   `apm.lock.yaml`.
 
 `cargo make check` mirrors CI exactly. The pre-push hook runs it,
