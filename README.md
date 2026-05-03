@@ -96,7 +96,7 @@ top-level key for something else.
 
 | feature       | default | what it adds |
 |---------------|---------|--------------|
-| `std-helpers` | yes     | functions: `env(name, default?)`, `is_windows()`, `is_linux()`, `is_mac()`. filters: `\| hash`, `\| port_offset(start, range)` |
+| `std-helpers` | yes     | functions: `env(name, default?)`, `home()`, `is_windows()`, `is_linux()`, `is_mac()`. filters: `\| hash`, `\| port_offset(start, range)` |
 | `shell`       | no      | `ps()` / `psf()` (Windows), `bash()` / `bashf()` (Unix) |
 | `merge`       | no      | `load_merged()` / `discover_config_files()` — yui/shun-style multi-file config loading |
 | `tracing`     | no      | emit `tracing` events from internal operations |
