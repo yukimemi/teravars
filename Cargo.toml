@@ -13,7 +13,7 @@ keywords = ["tera", "template", "toml", "config"]
 
 [features]
 default = ["std-helpers"]
-std-helpers = []
+std-helpers = ["dep:dirs"]
 shell = []
 merge = []
 tracing = ["dep:tracing"]
@@ -26,6 +26,7 @@ serde_json = "1"
 thiserror = "2"
 whoami = "1"
 
+dirs = { version = "6", optional = true }
 tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
