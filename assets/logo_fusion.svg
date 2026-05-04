@@ -1,0 +1,12 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background: Config File Shape -->
+  <rect x="20" y="20" width="160" height="160" rx="20" fill="#2c3e50" />
+  
+  <!-- Outer Brackets: Tera {{ }} -->
+  <text x="45" y="115" font-family="monospace" font-size="60" fill="#ecf0f1" font-weight="bold">{{</text>
+  <text x="125" y="115" font-family="monospace" font-size="60" fill="#ecf0f1" font-weight="bold">}}</text>
+  
+  <!-- Inner: [v] for Vars -->
+  <rect x="75" y="75" width="50" height="50" rx="5" fill="#e67e22" />
+  <text x="88" y="112" font-family="monospace" font-size="40" fill="white" font-weight="bold">v</text>
+</svg>

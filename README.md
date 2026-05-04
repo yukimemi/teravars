@@ -1,12 +1,20 @@
 # teravars
 
-> [Tera] templating + smart `[vars]` handling for self-rendering TOML
-> configs. Extracted from the duplicated patterns in
-> [shun] / [rvpm] / [todoke] / [yui] / [spyrun].
+<p align="center">
+  <img src="https://raw.githubusercontent.com/yukimemi/teravars/master/assets/logo_with_icon.svg" width="400" alt="teravars logo">
+</p>
 
-**Status: 0.1.3 — core + multi-file merge + `include` directive +
-`hash` / `port_offset` filters shipped. Migration of the 5 sibling
-tools is the next step; see [ROADMAP.md](./ROADMAP.md).**
+<p align="center">
+  <strong>[Tera] templating + smart `[vars]` handling for self-rendering TOML configs.</strong>
+</p>
+
+<p align="center">
+  Extracted from the duplicated patterns in <a href="https://github.com/yukimemi/shun">shun</a> / <a href="https://github.com/yukimemi/rvpm">rvpm</a> / <a href="https://github.com/yukimemi/todoke">todoke</a> / <a href="https://github.com/yukimemi/yui">yui</a> / <a href="https://github.com/yukimemi/spyrun">spyrun</a>.
+</p>
+
+---
+
+**Status: 0.1.3 — core + multi-file merge + `include` directive + `hash` / `port_offset` filters shipped. Migration of the 5 sibling tools is the next step; see [ROADMAP.md](https://github.com/yukimemi/teravars/blob/master/ROADMAP.md).**
 
 ## Quickstart
 
