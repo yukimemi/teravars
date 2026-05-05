@@ -1,0 +1,61 @@
+preset = "github.com/yukimemi/pj-presets:rust-lib"
+applied_at = "2026-05-05T15:33:10.124134Z"
+
+[[templates]]
+source = "github.com/yukimemi/pj-base"
+rev = "c8c22d87d21225ce16543f7c9d0d417f4cf36b8d"
+version = "0.2.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust"
+rev = "3deb51c5fb667544a10c2bbcefc180290eb8db54"
+version = "0.2.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust-lib"
+rev = "0733ad156782c513657a6d4dd5a1123957e4982d"
+version = "0.1.0"
+
+[files.".editorconfig"]
+content_hash = "58657ee086523ff34b0b1aef4da8a50a7489d1219ed206ddd774794f493275bb"
+once_applied = true
+
+[files.".github/workflows/ci.yml"]
+content_hash = "a7a9e10867d5b2ec06fecb9f3248b0f2ad940584cc583bd2b9dd48cccff624b8"
+
+[files.".github/workflows/release.yml"]
+content_hash = "6c51d0d36d8c6a5299da254dee010ee87ba0ffe46864c9dba31c3480fcca3a56"
+once_applied = true
+
+[files.".gitignore"]
+content_hash = "733fc58cfdd43e5c91b522e71932bbd22c83b51700937fed382564bbe7262193"
+
+[files."AGENTS.md"]
+content_hash = "52d14572656825598d4c52bfe881064c0cd86bc3bf842c68b3836afc60f27718"
+
+[files."CLAUDE.md"]
+content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
+
+[files."GEMINI.md"]
+content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390"
+
+[files."Makefile.toml"]
+content_hash = "a472b7d29835466dfa5d9fe7dbceb69dd39736a5b05b1fbe5b2cd7726a63a025"
+
+[files."apm.yml"]
+content_hash = "be14c0cc6672e92c494ef70e3ab867e0970b0cf9956584feb82b0e80ec3cb529"
+
+[files."clippy.toml"]
+content_hash = "89dbb3b4fd63c479f61f077d2383ab5c0998ea838f271ed57fd09281975deda0"
+
+[files."renovate.json"]
+content_hash = "2ad03ca1cca4789f4f4be3ff727b2aff2fe252bbf7a49e32f20d20d3731ca3f5"
+
+[files."renri.toml"]
+content_hash = "f4751570494ba62997cfb47e3abee2e707d3e01d924d1e8b940905a4e7c974f3"
+
+[files."rust-toolchain.toml"]
+content_hash = "9eac3c057320afbad00022718e0c14731122b4c3f28abd2dc702846244c39f66"
+
+[files."rustfmt.toml"]
+content_hash = "8a0bd07a7aaaf3e9fed5dd297b04a5f96c4a969d895375aa4e00247a95aa616c"
