@@ -18,7 +18,7 @@ args = ["fmt", "--all"]
 [tasks.clippy]
 description = "Run clippy with warnings as errors"
 command = "cargo"
-args = ["clippy", "--all-targets", "--", "-D", "warnings"]
+args = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
 
 [tasks.clippy-all]
 description = "clippy with --all-features"
@@ -28,12 +28,7 @@ args = ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "wa
 [tasks.test]
 description = "Run all tests"
 command = "cargo"
-args = ["test"]
-
-[tasks.clippy-none]
-description = "clippy with --no-default-features"
-command = "cargo"
-args = ["clippy", "--locked", "--all-targets", "--no-default-features", "--", "-D", "warnings"]
+args = ["test", "--locked"]
 
 [tasks.lock-check]
 description = "Verify Cargo.lock is in sync with Cargo.toml"
@@ -44,11 +39,6 @@ args = ["check", "--locked", "--all-targets"]
 description = "Dry-run crates.io publish"
 command = "cargo"
 args = ["publish", "--dry-run", "--allow-dirty"]
-
-[tasks.test-all]
-description = "test with --all-features"
-command = "cargo"
-args = ["test", "--locked", "--all-features"]
 
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
@@ -72,11 +62,6 @@ else
 end
 echo "Installed pre-push hook -> ${hook_file}"
 '''
-
-[tasks.test-none]
-description = "test with --no-default-features"
-command = "cargo"
-args = ["test", "--locked", "--no-default-features"]
 
 [tasks.apm-install]
 description = "Install agent skills declared in apm.yml (Copilot / Claude / Gemini targets). Skipped silently when apm.yml or the apm CLI is absent."
@@ -144,6 +129,11 @@ end
 exec apm install --update -t copilot,claude,gemini
 '''
 
+[tasks.clippy-none]
+description = "clippy with --no-default-features"
+command = "cargo"
+args = ["clippy", "--locked", "--all-targets", "--no-default-features", "--", "-D", "warnings"]
+
 [tasks.setup]
 description = "One-time setup for new contributors: pre-push hook + APM install"
 dependencies = ["hook-install", "apm-install"]
@@ -170,3 +160,13 @@ end
 [tasks.on-add]
 description = "Wired to renri's [[hooks.post_create]] — runs in a freshly created worktree"
 dependencies = ["apm-install-update", "vcs-fetch"]
+
+[tasks.test-all]
+description = "test with --all-features"
+command = "cargo"
+args = ["test", "--locked", "--all-features"]
+
+[tasks.test-none]
+description = "test with --no-default-features"
+command = "cargo"
+args = ["test", "--locked", "--no-default-features"]
