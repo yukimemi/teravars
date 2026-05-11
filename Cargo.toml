@@ -27,7 +27,7 @@ thiserror = "2.0.18"
 whoami = "1"
 
 dirs = { version = "6", optional = true }
-tracing = { version = "0.1", optional = true }
+tracing = { version = "0.1.44", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
