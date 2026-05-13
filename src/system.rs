@@ -18,8 +18,8 @@ impl SystemInfo {
         Self {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            user: whoami::username(),
-            host: whoami::fallible::hostname().unwrap_or_default(),
+            user: whoami::username().unwrap_or_default(),
+            host: whoami::hostname().unwrap_or_default(),
             cwd: std::env::current_dir()
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned())
