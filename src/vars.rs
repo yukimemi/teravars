@@ -160,8 +160,11 @@ pub fn resolve_in_context_with_max_iter(
         return Ok(());
     }
 
+    // `Context::insert` overwrites the existing entry, so we can clone the
+    // caller-supplied context once and refresh only the `vars` binding on
+    // each iteration of the fixpoint loop.
+    let mut ctx = extra_ctx.clone();
     for _ in 0..max_iter {
-        let mut ctx = extra_ctx.clone();
         ctx.insert("vars", &*vars);
 
         let mut next = Table::new();
