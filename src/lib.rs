@@ -39,7 +39,10 @@ mod vars;
 pub use engine::Engine;
 pub use error::Error;
 pub use system::{SystemInfo, system_context};
-pub use vars::{expand_value, extract_vars, resolve, resolve_with_max_iter};
+pub use vars::{
+    expand_value, extract_vars, resolve, resolve_in_context, resolve_in_context_with_max_iter,
+    resolve_with_max_iter,
+};
 
 #[cfg(feature = "merge")]
 pub use merge::{MergedConfig, deep_merge, discover_config_files, load_merged};

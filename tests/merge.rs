@@ -435,6 +435,89 @@ greeting = "hello-from-main"
 }
 
 #[test]
+fn vars_self_ref_with_tera_block_in_value() {
+    // Regression for issue #21: a [vars] value that contains a Tera control
+    // block (e.g. `{% if is_windows() %}...{% endif %}`) is a *value*, not a
+    // control-flow line, and must be extracted into the vars table so other
+    // [vars] entries can refer to it.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+[vars]
+base = '''{% if is_windows() %}C:\Kanade{% else %}/var/lib/kanade{% endif %}'''
+log_dir = '''{{ vars.base }}{% if is_windows() %}\logs{% else %}/logs{% endif %}'''
+
+[log]
+path = '{{ vars.log_dir }}/agent.log'
+"#,
+    );
+
+    let mut engine = Engine::new();
+    let merged = load_merged([&path], &mut engine, &system_context()).unwrap();
+
+    let log = merged.config.get("log").and_then(|v| v.as_table()).unwrap();
+    let rendered = log.get("path").and_then(|v| v.as_str()).unwrap();
+
+    if cfg!(windows) {
+        assert_eq!(rendered, r"C:\Kanade\logs/agent.log");
+    } else {
+        assert_eq!(rendered, "/var/lib/kanade/logs/agent.log");
+    }
+}
+
+#[test]
+fn vars_value_references_system_context() {
+    // Regression for issue #21: a [vars] entry that references the caller-
+    // supplied context (e.g. `{{ system.host }}`) must resolve so downstream
+    // [vars] and config consumers see the concrete value, not the literal
+    // template string.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+[vars]
+who = '{{ system.host }}'
+banner = 'host={{ vars.who }}'
+
+[agent]
+id = '{{ vars.banner }}'
+"#,
+    );
+
+    let mut ctx = Context::new();
+    ctx.insert(
+        "system",
+        &serde_json::json!({
+            "host": "myhost",
+        }),
+    );
+
+    let mut engine = Engine::new();
+    let merged = load_merged([&path], &mut engine, &ctx).unwrap();
+
+    assert_eq!(
+        merged.vars.get("who").and_then(|v| v.as_str()),
+        Some("myhost"),
+    );
+    assert_eq!(
+        merged.vars.get("banner").and_then(|v| v.as_str()),
+        Some("host=myhost"),
+    );
+    let agent = merged
+        .config
+        .get("agent")
+        .and_then(|v| v.as_table())
+        .unwrap();
+    assert_eq!(
+        agent.get("id").and_then(|v| v.as_str()),
+        Some("host=myhost")
+    );
+}
+
+#[test]
 fn include_conflict_root_and_teravars() {
     let dir = TempDir::new().unwrap();
     write(&dir, "base.toml", "[vars]\nx = \"1\"\n");

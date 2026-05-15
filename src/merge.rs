@@ -11,7 +11,7 @@ use toml::{Table, Value};
 use crate::Result;
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::vars::{extract_vars, resolve, scan_tera_tags};
+use crate::vars::{extract_vars, resolve_in_context, scan_tera_tags};
 
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
@@ -40,7 +40,7 @@ pub fn load_merged<P: AsRef<Path>>(
     }
 
     if !acc_vars.is_empty() {
-        resolve(&mut acc_vars, engine)?;
+        resolve_in_context(&mut acc_vars, engine, extra_ctx)?;
     }
 
     Ok(MergedConfig {
@@ -82,7 +82,7 @@ fn load_file_recursive(
 
     let mut resolution_vars = acc_vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
-    let _ = resolve(&mut resolution_vars, engine);
+    let _ = resolve_in_context(&mut resolution_vars, engine, extra_ctx);
 
     let mut ctx = extra_ctx.clone();
     ctx.insert("vars", &resolution_vars);
@@ -246,19 +246,25 @@ fn strip_tera_blocks(text: &str) -> String {
             continue;
         }
 
-        let scan = scan_tera_tags(trimmed);
-        if scan.unterminated {
-            multiline_open = true;
+        // Only treat a line as a Tera control line when its trimmed form
+        // starts with `{%`. A TOML `key = "...{% if %}..."` is a value, not
+        // a control directive, and must be left in the skeleton so the
+        // include detector can still see (or correctly ignore) the key.
+        if trimmed.starts_with("{%") {
+            let scan = scan_tera_tags(trimmed);
+            if scan.unterminated {
+                multiline_open = true;
+                out.push('\n');
+                continue;
+            }
+            block_depth = block_depth
+                .saturating_add(scan.opens)
+                .saturating_sub(scan.closes);
             out.push('\n');
             continue;
         }
 
-        let starting_depth = block_depth;
-        block_depth = block_depth
-            .saturating_add(scan.opens)
-            .saturating_sub(scan.closes);
-
-        if scan.has_any_tag || starting_depth > 0 {
+        if block_depth > 0 {
             out.push('\n');
             continue;
         }

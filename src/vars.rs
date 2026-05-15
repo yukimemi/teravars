@@ -37,18 +37,22 @@ fn extract_vars_section(text: &str) -> String {
             continue;
         }
 
-        let scan = scan_tera_tags(trimmed);
-        if scan.unterminated {
-            multiline_tag_open = true;
+        // A line is a Tera *control* line only when its trimmed form starts
+        // with `{%`. A TOML `key = "...{% if %}..."` line has `{%` embedded
+        // in its value and must be preserved into the extracted vars.
+        if trimmed.starts_with("{%") {
+            let scan = scan_tera_tags(trimmed);
+            if scan.unterminated {
+                multiline_tag_open = true;
+                continue;
+            }
+            block_depth = block_depth
+                .saturating_add(scan.opens)
+                .saturating_sub(scan.closes);
             continue;
         }
 
-        let starting_depth = block_depth;
-        block_depth = block_depth
-            .saturating_add(scan.opens)
-            .saturating_sub(scan.closes);
-
-        if scan.has_any_tag || starting_depth > 0 {
+        if block_depth > 0 {
             continue;
         }
 
@@ -75,7 +79,6 @@ fn extract_vars_section(text: &str) -> String {
 pub(crate) struct TagScan {
     pub opens: usize,
     pub closes: usize,
-    pub has_any_tag: bool,
     pub unterminated: bool,
 }
 
@@ -92,12 +95,10 @@ pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
 
     let mut opens = 0;
     let mut closes = 0;
-    let mut has_any_tag = false;
     let mut unterminated = false;
     let mut s = line;
 
     while let Some(idx) = s.find("{%") {
-        has_any_tag = true;
         let after = &s[idx + 2..];
         match after.find("%}") {
             Some(end) => {
@@ -120,22 +121,47 @@ pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
     TagScan {
         opens,
         closes,
-        has_any_tag,
         unterminated,
     }
 }
 
 pub fn resolve(vars: &mut Table, engine: &mut Engine) -> Result<()> {
-    resolve_with_max_iter(vars, engine, DEFAULT_MAX_RESOLVE_ITERATIONS)
+    resolve_in_context_with_max_iter(
+        vars,
+        engine,
+        &Context::new(),
+        DEFAULT_MAX_RESOLVE_ITERATIONS,
+    )
 }
 
 pub fn resolve_with_max_iter(vars: &mut Table, engine: &mut Engine, max_iter: usize) -> Result<()> {
+    resolve_in_context_with_max_iter(vars, engine, &Context::new(), max_iter)
+}
+
+/// Like [`resolve`], but each rendering iteration is performed against a
+/// context that already contains the caller-supplied bindings. Use this when
+/// `[vars]` entries reference outside data such as `system.*` or any other
+/// values the caller has placed into the [`Context`].
+pub fn resolve_in_context(
+    vars: &mut Table,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+) -> Result<()> {
+    resolve_in_context_with_max_iter(vars, engine, extra_ctx, DEFAULT_MAX_RESOLVE_ITERATIONS)
+}
+
+pub fn resolve_in_context_with_max_iter(
+    vars: &mut Table,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    max_iter: usize,
+) -> Result<()> {
     if vars.is_empty() {
         return Ok(());
     }
 
     for _ in 0..max_iter {
-        let mut ctx = Context::new();
+        let mut ctx = extra_ctx.clone();
         ctx.insert("vars", &*vars);
 
         let mut next = Table::new();
@@ -330,6 +356,58 @@ url = "https://{{ vars.host }}/api"
         assert_eq!(
             server.get("url").and_then(|v| v.as_str()),
             Some("https://example.com/api")
+        );
+    }
+
+    #[test]
+    fn extract_vars_keeps_value_with_embedded_tera_block() {
+        // Regression for issue #21: a `[vars]` value that contains Tera
+        // control tags inside its string literal must still be extracted —
+        // it is a TOML key=value, not a top-level Tera control line.
+        let toml_text = r#"
+[vars]
+base = '''{% if is_windows() %}win{% else %}unix{% endif %}'''
+log_dir = '''{{ vars.base }}/logs'''
+"#;
+        let vars = extract_vars(toml_text).unwrap();
+        assert!(
+            vars.get("base").is_some(),
+            "vars.base should survive extraction even though its value has {{% if %}}"
+        );
+        assert!(
+            vars.get("log_dir").is_some(),
+            "vars.log_dir should survive extraction even though its value has {{% if %}}"
+        );
+    }
+
+    #[test]
+    fn resolve_in_context_sees_extra_bindings() {
+        // Regression for issue #21: when a [vars] entry references a value
+        // supplied by the caller (e.g. `{{ system.host }}`), resolve must be
+        // able to see it; otherwise the entry stays as an unrendered literal
+        // and downstream consumers fail with "vars.X not found in context".
+        let mut vars = toml::from_str::<Table>(
+            r#"
+who = "{{ system.host }}"
+banner = "host={{ vars.who }}"
+"#,
+        )
+        .unwrap();
+        let mut engine = Engine::new_minimal();
+        let mut extra = Context::new();
+        extra.insert(
+            "system",
+            &serde_json::json!({
+                "host": "myhost",
+            }),
+        );
+
+        resolve_in_context(&mut vars, &mut engine, &extra).unwrap();
+
+        assert_eq!(vars.get("who").and_then(|v| v.as_str()), Some("myhost"));
+        assert_eq!(
+            vars.get("banner").and_then(|v| v.as_str()),
+            Some("host=myhost"),
         );
     }
 
