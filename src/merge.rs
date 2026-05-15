@@ -82,6 +82,12 @@ fn load_file_recursive(
 
     let mut resolution_vars = acc_vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
+    // Best-effort per-file resolution: a [vars] entry in this file may
+    // legitimately reference vars introduced by a later file in the merge
+    // chain, so we tolerate `ResolveNotConverged` / render errors here.
+    // The authoritative pass runs at the end of `load_merged` once every
+    // file has contributed; genuine render failures resurface from the
+    // `engine.render` call below with a more useful location.
     let _ = resolve_in_context(&mut resolution_vars, engine, extra_ctx);
 
     let mut ctx = extra_ctx.clone();

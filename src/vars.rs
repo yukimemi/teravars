@@ -40,6 +40,14 @@ fn extract_vars_section(text: &str) -> String {
         // A line is a Tera *control* line only when its trimmed form starts
         // with `{%`. A TOML `key = "...{% if %}..."` line has `{%` embedded
         // in its value and must be preserved into the extracted vars.
+        //
+        // Known limitation: a continuation line of a multi-line TOML triple-
+        // quoted string that itself starts with `{%` is still classified as
+        // a control line. This text-based extractor does not track TOML
+        // string state across lines, so multi-line [vars] literals whose
+        // inner lines lead with `{%` are not supported — keep such templates
+        // on a single line (the documented [vars] style) or hoist them out
+        // of [vars].
         if trimmed.starts_with("{%") {
             let scan = scan_tera_tags(trimmed);
             if scan.unterminated {
