@@ -35,7 +35,12 @@ pub(super) fn port_offset_filter(value: u64, kwargs: Kwargs, _state: &State) -> 
         ));
     }
 
-    Ok(Value::from((value % range) + start))
+    // `start` is caller-supplied and unbounded, so guard the offset against
+    // u64 overflow rather than panicking (debug) / wrapping (release).
+    let port = start
+        .checked_add(value % range)
+        .ok_or_else(|| Error::message("`port_offset` overflowed u64 (`start` is too large)"))?;
+    Ok(Value::from(port))
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
