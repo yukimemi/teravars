@@ -40,14 +40,21 @@ mod tests {
 
     #[test]
     fn system_context_populates_known_fields() {
+        // tera 2.0 dropped `Context::into_json`, so verify the `system.*`
+        // namespace by rendering each field through a one-off template.
         let ctx = system_context();
-        let json = ctx.into_json();
-        let system = json.get("system").expect("system namespace missing");
-        assert!(system.get("os").and_then(|v| v.as_str()).is_some());
-        assert!(system.get("arch").and_then(|v| v.as_str()).is_some());
-        assert!(system.get("user").is_some());
-        assert!(system.get("host").is_some());
-        assert!(system.get("cwd").and_then(|v| v.as_str()).is_some());
+
+        // os / arch come from compile-time consts and must round-trip exactly.
+        let os = tera::Tera::one_off("{{ system.os }}", &ctx, false).unwrap();
+        assert_eq!(os, std::env::consts::OS);
+        let arch = tera::Tera::one_off("{{ system.arch }}", &ctx, false).unwrap();
+        assert_eq!(arch, std::env::consts::ARCH);
+
+        // user / host / cwd must at least be present (renderable without error).
+        for field in ["user", "host", "cwd"] {
+            tera::Tera::one_off(&format!("{{{{ system.{field} }}}}"), &ctx, false)
+                .unwrap_or_else(|e| panic!("system.{field} should render: {e}"));
+        }
     }
 
     #[test]

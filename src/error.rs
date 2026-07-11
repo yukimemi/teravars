@@ -46,22 +46,23 @@ mod tests {
 
     #[test]
     fn tera_error_chain_is_flattened_into_render_message() {
-        let mut tera = tera::Tera::default();
+        let tera = tera::Tera::default();
         let err = tera
-            .render_str("{{ vars.missing }}", &tera::Context::new())
+            .render_str("{{ vars.missing }}", &tera::Context::new(), false)
             .unwrap_err();
         let converted: Error = err.into();
         let msg = converted.to_string();
 
         assert!(msg.contains("template render failed"));
         // The whole point of walking err.source(): the actual cause must reach the user,
-        // not just the bare top-level "Failed to render '__tera_one_off'" message.
+        // not just the bare top-level render message. tera 2.0 reports an undefined
+        // lookup as "Field `missing` is not defined".
         assert!(
-            msg.contains("vars.missing"),
+            msg.contains("missing"),
             "expected the missing-variable name to be surfaced, got: {msg}"
         );
         assert!(
-            msg.contains("not found"),
+            msg.contains("not defined"),
             "expected the cause description to be surfaced, got: {msg}"
         );
     }

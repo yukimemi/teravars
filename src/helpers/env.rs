@@ -1,19 +1,15 @@
-use std::collections::HashMap;
+use tera::{Error, Kwargs, State, TeraResult, Value};
 
-use serde_json::Value;
-use tera::{Error, Result};
-
-pub(super) fn env_fn(args: &HashMap<String, Value>) -> Result<Value> {
-    let name = args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::msg("env(): required argument 'name' missing or not a string"))?;
+pub(super) fn env_fn(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    let name = kwargs
+        .get::<&str>("name")?
+        .ok_or_else(|| Error::message("env(): required argument 'name' missing or not a string"))?;
 
     match std::env::var(name) {
-        Ok(value) => Ok(Value::String(value)),
-        Err(_) => match args.get("default") {
-            Some(default) => Ok(default.clone()),
-            None => Err(Error::msg(format!(
+        Ok(value) => Ok(Value::from(value)),
+        Err(_) => match kwargs.get::<Value>("default")? {
+            Some(default) => Ok(default),
+            None => Err(Error::message(format!(
                 "env(): environment variable '{name}' is not set and no default was provided"
             ))),
         },
@@ -23,12 +19,10 @@ pub(super) fn env_fn(args: &HashMap<String, Value>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tera::Context;
 
-    fn args(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
+    fn state<'a>(ctx: &'a Context) -> State<'a> {
+        State::new(ctx)
     }
 
     #[test]
@@ -38,30 +32,36 @@ mod tests {
         unsafe {
             std::env::set_var("TERAVARS_TEST_ENV", "abc");
         }
-        let v = env_fn(&args(&[(
-            "name",
-            Value::String("TERAVARS_TEST_ENV".into()),
-        )]))
+        let ctx = Context::new();
+        let v = env_fn(
+            Kwargs::from([("name", Value::from("TERAVARS_TEST_ENV"))]),
+            &state(&ctx),
+        )
         .unwrap();
-        assert_eq!(v, Value::String("abc".into()));
+        assert_eq!(v, Value::from("abc"));
     }
 
     #[test]
     fn env_uses_default_when_unset() {
-        let v = env_fn(&args(&[
-            ("name", Value::String("TERAVARS_DOES_NOT_EXIST".into())),
-            ("default", Value::String("fallback".into())),
-        ]))
+        let ctx = Context::new();
+        let v = env_fn(
+            Kwargs::from([
+                ("name", Value::from("TERAVARS_DOES_NOT_EXIST")),
+                ("default", Value::from("fallback")),
+            ]),
+            &state(&ctx),
+        )
         .unwrap();
-        assert_eq!(v, Value::String("fallback".into()));
+        assert_eq!(v, Value::from("fallback"));
     }
 
     #[test]
     fn env_errors_when_unset_and_no_default() {
-        let err = env_fn(&args(&[(
-            "name",
-            Value::String("TERAVARS_DOES_NOT_EXIST_2".into()),
-        )]))
+        let ctx = Context::new();
+        let err = env_fn(
+            Kwargs::from([("name", Value::from("TERAVARS_DOES_NOT_EXIST_2"))]),
+            &state(&ctx),
+        )
         .unwrap_err();
         assert!(err.to_string().contains("not set"));
     }

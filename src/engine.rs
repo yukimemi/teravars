@@ -1,4 +1,4 @@
-use tera::{Context, Function, Tera};
+use tera::{Context, Function, FunctionResult, Tera};
 
 use crate::Result;
 use crate::helpers;
@@ -20,15 +20,18 @@ impl Engine {
         }
     }
 
-    pub fn register_function<F>(&mut self, name: &str, f: F)
+    pub fn register_function<F, Res>(&mut self, name: &str, f: F)
     where
-        F: Function + 'static,
+        F: Function<Res>,
+        Res: FunctionResult,
     {
-        self.tera.register_function(name, f);
+        self.tera.register_function(name.to_string(), f);
     }
 
     pub fn render(&mut self, src: &str, ctx: &Context) -> Result<String> {
-        Ok(self.tera.render_str(src, ctx)?)
+        // autoescape is disabled: these templates render TOML config values
+        // (paths, commands, URLs), not HTML — escaping `&`/`<`/`>` would corrupt them.
+        Ok(self.tera.render_str(src, ctx, false)?)
     }
 
     pub fn tera_mut(&mut self) -> &mut Tera {
@@ -71,8 +74,13 @@ mod tests {
 
     #[test]
     fn register_function_overrides_helper() {
+        use tera::{Kwargs, State, TeraResult, Value};
+
         let mut engine = Engine::new();
-        engine.register_function("custom", |_args: &_| Ok("ok".into()));
+        engine.register_function(
+            "custom",
+            |_kwargs: Kwargs, _state: &State| -> TeraResult<Value> { Ok(Value::from("ok")) },
+        );
         let out = engine.render("{{ custom() }}", &Context::new()).unwrap();
         assert_eq!(out, "ok");
     }

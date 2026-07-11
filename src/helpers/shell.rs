@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::process::Command;
 
-use serde_json::Value;
-use tera::{Error, Result, Tera};
+use tera::{Error, Kwargs, State, Tera, TeraResult, Value};
 
 pub(super) fn register(tera: &mut Tera) {
     tera.register_function("ps", ps_fn);
@@ -12,66 +10,69 @@ pub(super) fn register(tera: &mut Tera) {
 }
 
 #[cfg(windows)]
-fn ps_fn(args: &HashMap<String, Value>) -> Result<Value> {
-    let script = required_str(args, "script", "ps")?;
+fn ps_fn(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    let script = required_str(&kwargs, "script", "ps")?;
     run("powershell", &["-NoProfile", "-Command", script], "ps")
 }
 
 #[cfg(not(windows))]
-fn ps_fn(_args: &HashMap<String, Value>) -> Result<Value> {
-    Err(Error::msg("ps() is only available on Windows targets"))
+fn ps_fn(_kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    Err(Error::message("ps() is only available on Windows targets"))
 }
 
 #[cfg(windows)]
-fn psf_fn(args: &HashMap<String, Value>) -> Result<Value> {
-    let file = required_str(args, "file", "psf")?;
+fn psf_fn(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    let file = required_str(&kwargs, "file", "psf")?;
     run("powershell", &["-NoProfile", "-File", file], "psf")
 }
 
 #[cfg(not(windows))]
-fn psf_fn(_args: &HashMap<String, Value>) -> Result<Value> {
-    Err(Error::msg("psf() is only available on Windows targets"))
+fn psf_fn(_kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    Err(Error::message("psf() is only available on Windows targets"))
 }
 
 #[cfg(unix)]
-fn bash_fn(args: &HashMap<String, Value>) -> Result<Value> {
-    let script = required_str(args, "script", "bash")?;
+fn bash_fn(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    let script = required_str(&kwargs, "script", "bash")?;
     run("bash", &["-c", script], "bash")
 }
 
 #[cfg(not(unix))]
-fn bash_fn(_args: &HashMap<String, Value>) -> Result<Value> {
-    Err(Error::msg("bash() is only available on Unix targets"))
+fn bash_fn(_kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    Err(Error::message("bash() is only available on Unix targets"))
 }
 
 #[cfg(unix)]
-fn bashf_fn(args: &HashMap<String, Value>) -> Result<Value> {
-    let file = required_str(args, "file", "bashf")?;
+fn bashf_fn(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    let file = required_str(&kwargs, "file", "bashf")?;
     run("bash", &[file], "bashf")
 }
 
 #[cfg(not(unix))]
-fn bashf_fn(_args: &HashMap<String, Value>) -> Result<Value> {
-    Err(Error::msg("bashf() is only available on Unix targets"))
+fn bashf_fn(_kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+    Err(Error::message("bashf() is only available on Unix targets"))
 }
 
-fn required_str<'a>(args: &'a HashMap<String, Value>, key: &str, fname: &str) -> Result<&'a str> {
-    args.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-        Error::msg(format!(
+#[cfg(any(windows, unix))]
+fn required_str<'a>(kwargs: &'a Kwargs, key: &'a str, fname: &str) -> TeraResult<&'a str> {
+    match kwargs.get::<&str>(key)? {
+        Some(s) => Ok(s),
+        None => Err(Error::message(format!(
             "{fname}(): required argument '{key}' missing or not a string"
-        ))
-    })
+        ))),
+    }
 }
 
-fn run(program: &str, args: &[&str], fname: &str) -> Result<Value> {
+#[cfg(any(windows, unix))]
+fn run(program: &str, args: &[&str], fname: &str) -> TeraResult<Value> {
     let output = Command::new(program)
         .args(args)
         .output()
-        .map_err(|e| Error::msg(format!("{fname}() failed to spawn '{program}': {e}")))?;
+        .map_err(|e| Error::message(format!("{fname}() failed to spawn '{program}': {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::msg(format!(
+        return Err(Error::message(format!(
             "{fname}() exited with {}: {}",
             output.status,
             stderr.trim()
@@ -81,5 +82,5 @@ fn run(program: &str, args: &[&str], fname: &str) -> Result<Value> {
     let stdout = String::from_utf8_lossy(&output.stdout)
         .trim_end_matches(['\n', '\r'])
         .to_string();
-    Ok(Value::String(stdout))
+    Ok(Value::from(stdout))
 }
