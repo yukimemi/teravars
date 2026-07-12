@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "teravars"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "pretty_assertions",
