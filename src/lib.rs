@@ -62,10 +62,12 @@ pub use tera::Error as TeraError;
 /// is re-exported as [`TeraError`] to avoid clashing with teravars' [`Error`].
 ///
 /// ```
-/// use teravars::{Engine, Context, Kwargs, State, TeraResult, Value};
+/// use teravars::{Context, Engine, Kwargs, State, TeraError, TeraResult, Value};
 ///
 /// fn shout(kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
-///     let text: &str = kwargs.must_get("text")?;
+///     let text: &str = kwargs
+///         .get("text")?
+///         .ok_or_else(|| TeraError::message("shout(): `text` is required"))?;
 ///     Ok(Value::from(text.to_uppercase()))
 /// }
 ///
