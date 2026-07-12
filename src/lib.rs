@@ -76,6 +76,23 @@ pub use tera::Error as TeraError;
 /// let out = engine.render(r#"{{ shout(text="hi") }}"#, &Context::new()).unwrap();
 /// assert_eq!(out, "HI");
 /// ```
+///
+/// Custom filters work the same way — `Fn(Arg, Kwargs, &State) -> Res`, where
+/// `Arg` is any [`ArgFromValue`] type (`&str`, `i64`, …) — registered through
+/// [`Engine::tera_mut`]:
+///
+/// ```
+/// use teravars::{Context, Engine, Kwargs, State, TeraResult, Value};
+///
+/// fn exclaim(value: &str, _kwargs: Kwargs, _state: &State) -> TeraResult<Value> {
+///     Ok(Value::from(format!("{value}!")))
+/// }
+///
+/// let mut engine = Engine::new_minimal();
+/// engine.tera_mut().register_filter("exclaim", exclaim);
+/// let out = engine.render(r#"{{ "hi" | exclaim }}"#, &Context::new()).unwrap();
+/// assert_eq!(out, "hi!");
+/// ```
 pub use tera::{
     ArgFromValue, Filter, Function, FunctionResult, Kwargs, Map, Number, State, TeraResult, Value,
 };
