@@ -30,5 +30,5 @@ tracing = { version = "0.1.44", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 tempfile = "3.27.0"
