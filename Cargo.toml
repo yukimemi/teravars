@@ -22,7 +22,7 @@ tracing = ["dep:tracing"]
 tera = "2.1.0"
 toml = "1.1.4"
 serde = { version = "1.0.229", features = ["derive"] }
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 whoami = "2.1.2"
 
 dirs = { version = "6", optional = true }
