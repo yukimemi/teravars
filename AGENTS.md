@@ -29,8 +29,9 @@ tools are slated to migrate onto it: yui, rvpm, todoke, shun, spyrun.
 ```
 src/
   lib.rs        — module list, public re-exports, top-level docs + doctest
+  comments.rs   — strip_toml_comments: TOML/Tera-aware `#` comment stripper
   engine.rs     — Engine: wraps tera::Tera; new()/new_minimal()/render()/
-                   register_function()/tera_mut()
+                   render_toml()/register_function()/tera_mut()
   error.rs      — teravars::Error (thiserror); From<tera::Error> walks
                    the source chain so callers see the real cause, not the
                    bare `Failed to render '__tera_one_off'`
@@ -48,7 +49,7 @@ src/
     filters.rs  — hash (FNV-1a 64-bit) + port_offset      (cfg=std-helpers)
     shell.rs    — ps/psf (Windows), bash/bashf (Unix)     (cfg=shell)
 tests/
-  merge.rs      — integration tests for load_merged / include
+  merge.rs      — integration tests for load_merged / include / comments
 ```
 
 ## Key design decisions (don't rediscover)
@@ -114,6 +115,32 @@ user before reverting any of them.
   exists but errors with a clear "X is only available on Y
   targets" message — so the registry is consistent across builds
   but the behaviour reflects reality.
+- **TOML comments are stripped before rendering, not respected by
+  Tera.** Tera has no idea `#` starts a TOML comment, so rendering a
+  config file also rendered its comments — and the two most common
+  comment styles in a documented config are hard load failures:
+  `# port = "{{ vars.not_defined }}"` (field not defined) and
+  `# disable with {% if false %}` (unexpected end of input). Every
+  consumer hit this. `strip_toml_comments` (comments.rs) removes
+  comment text at the entry points that know they are looking at a
+  TOML document — `extract_vars`, `Engine::render_toml`, and once per
+  file in `load_merged` — while plain `Engine::render` stays literal
+  because it renders arbitrary text where `#` means nothing. The
+  scanner tracks TOML string state (`"…"`, `'…'`, `"""…"""`,
+  `'''…'''`, including the 3–5-quote terminating runs TOML permits)
+  and treats `{{ }}` / `{% %}` / `{# #}` as opaque — following Tera's
+  own string literals inside them, so a `}}` in `replace(from="}}")`
+  does not end the tag early. A URL fragment or a `replace(from="#")`
+  argument therefore survives; it drops only `#`-to-end-of-line,
+  keeping line numbers so error locations still match the file on
+  disk. In `load_merged` the removal is unobservable, since the
+  rendered text is parsed into a `toml::Table` and the source
+  discarded; `Engine::render_toml` hands back the rendered `String`,
+  so a caller that inspects it does see comment-free output.
+  Caveat for doctests: rustdoc treats a line whose first two
+  characters are `#` and a space as a hidden line, even inside a
+  string literal, so examples with commented TOML use `##` or
+  `concat!`.
 
 ## teravars-specific tooling notes
 

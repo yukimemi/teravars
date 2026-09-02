@@ -8,6 +8,8 @@
 //! use teravars::{Context, Engine, extract_vars, resolve, system_context};
 //!
 //! let raw = r#"
+//! ## sample: greeting = "{{ vars.not_defined }}"   <- a comment, never rendered
+//!
 //! [vars]
 //! greeting = "hello"
 //! who      = "{{ vars.greeting }} world"
@@ -24,10 +26,14 @@
 //! let mut ctx: Context = system_context();
 //! ctx.insert("vars", &vars);
 //!
-//! let rendered = engine.render(raw, &ctx).unwrap();
+//! // `render_toml`, not `render`: it strips the file's `#` comments first, so
+//! // a commented-out sample line cannot fail the render.
+//! let rendered = engine.render_toml(raw, &ctx).unwrap();
 //! assert!(rendered.contains("hello world on "));
+//! assert!(!rendered.contains("vars.not_defined"));
 //! ```
 
+mod comments;
 mod engine;
 mod error;
 mod helpers;
@@ -36,6 +42,7 @@ mod merge;
 mod system;
 mod vars;
 
+pub use comments::strip_toml_comments;
 pub use engine::Engine;
 pub use error::Error;
 pub use system::{SystemInfo, system_context};

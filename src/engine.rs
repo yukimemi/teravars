@@ -1,6 +1,7 @@
 use tera::{Context, Function, FunctionResult, Tera};
 
 use crate::Result;
+use crate::comments::strip_toml_comments;
 use crate::helpers;
 
 pub struct Engine {
@@ -34,6 +35,22 @@ impl Engine {
         Ok(self.tera.render_str(src, ctx, false)?)
     }
 
+    /// Render a whole TOML document, ignoring its `#` comments.
+    ///
+    /// Same as [`render`](Self::render) except the source is passed through
+    /// [`strip_toml_comments`] first, so Tera never sees comment text. Use
+    /// this for any template that *is* a TOML file: a commented-out sample
+    /// line (`# port = "{{ vars.example }}"`) or a note quoting teravars
+    /// syntax (`# disable with {% if false %}`) would otherwise render — and
+    /// usually fail the whole load. `load_merged` does
+    /// this for every file it reads.
+    ///
+    /// A `#` inside a string or a Tera delimiter is untouched; see
+    /// [`strip_toml_comments`] for the exact rules.
+    pub fn render_toml(&mut self, src: &str, ctx: &Context) -> Result<String> {
+        self.render(&strip_toml_comments(src), ctx)
+    }
+
     pub fn tera_mut(&mut self) -> &mut Tera {
         &mut self.tera
     }
@@ -56,6 +73,25 @@ mod tests {
         ctx.insert("name", "world");
         let out = engine.render("hello {{ name }}", &ctx).unwrap();
         assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn render_toml_leaves_comments_unrendered() {
+        let mut engine = Engine::new();
+        let mut ctx = Context::new();
+        ctx.insert("name", "world");
+        let src = concat!(
+            "# sample: greeting = \"{{ undefined_var }}\"\n",
+            "# disable: {% if false %}\n",
+            "greeting = \"{{ name }}\"\n",
+        );
+
+        // `render` still fails on the comment — it renders arbitrary text and
+        // has no way to know `#` starts a TOML comment.
+        assert!(engine.render(src, &ctx).is_err());
+
+        let out = engine.render_toml(src, &ctx).unwrap();
+        assert_eq!(out, "\n\ngreeting = \"world\"\n");
     }
 
     #[test]

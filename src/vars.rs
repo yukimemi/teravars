@@ -3,12 +3,19 @@ use toml::{Table, Value};
 
 use crate::Engine;
 use crate::Result;
+use crate::comments::strip_toml_comments;
 use crate::error::Error;
 
 pub const DEFAULT_MAX_RESOLVE_ITERATIONS: usize = 10;
 
+/// Carve the `[vars]` table out of a raw TOML+Tera document.
+///
+/// Comments are stripped first ([`strip_toml_comments`]), so a commented-out
+/// `# a = "1"` never becomes a var and a section header with a trailing note
+/// (`[vars] # app vars`) is still recognized.
 pub fn extract_vars(text: &str) -> Result<Table> {
-    let raw = extract_vars_section(text);
+    let text = strip_toml_comments(text);
+    let raw = extract_vars_section(&text);
     if raw.trim().is_empty() {
         return Ok(Table::new());
     }
@@ -453,5 +460,35 @@ ports = ["{{ port }}", 8080]
         let ports = server.get("ports").and_then(|v| v.as_array()).unwrap();
         assert_eq!(ports[0].as_str(), Some("8080"));
         assert_eq!(ports[1].as_integer(), Some(8080));
+    }
+
+    #[test]
+    fn extract_vars_ignores_comments() {
+        // Regression: comments are not config. A commented-out entry must not
+        // become a var, a section header with a trailing note must still be
+        // recognized, and Tera syntax quoted in a comment must not steer the
+        // extractor's block-depth tracking.
+        let toml_text = concat!(
+            "# [vars]\n",
+            "# stray = \"1\"\n",
+            "# {% if false %}\n",
+            "[vars] # app vars\n",
+            "kept = \"yes\"\n",
+            "# dropped = \"no\"\n",
+            "url = \"https://example.com/#anchor\" # trailing\n",
+            "\n",
+            "[other]\n",
+            "x = 1\n",
+        );
+        let vars = extract_vars(toml_text).unwrap();
+        assert_eq!(vars.get("kept").and_then(|v| v.as_str()), Some("yes"));
+        assert_eq!(
+            vars.get("url").and_then(|v| v.as_str()),
+            Some("https://example.com/#anchor"),
+            "a `#` inside a string is data, not a comment"
+        );
+        assert!(vars.get("dropped").is_none());
+        assert!(vars.get("stray").is_none());
+        assert_eq!(vars.len(), 2);
     }
 }
