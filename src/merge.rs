@@ -9,6 +9,7 @@ use tera::Context;
 use toml::{Table, Value};
 
 use crate::Result;
+use crate::comments::strip_toml_comments;
 use crate::engine::Engine;
 use crate::error::Error;
 use crate::vars::{extract_vars, resolve_in_context, scan_tera_tags};
@@ -68,6 +69,13 @@ fn load_file_recursive(
             format!("{}: {e}", path.display()),
         ))
     })?;
+
+    // Comment text never reaches Tera: a commented-out sample line or a note
+    // quoting teravars syntax would otherwise render (and typically fail the
+    // whole load). Done once here so include detection, [vars] extraction
+    // and the render below all see the same comment-free text; line numbers
+    // are preserved, so error locations still line up with the file on disk.
+    let raw = strip_toml_comments(&raw);
 
     let include_paths = extract_include_paths(&raw, path)?;
     for raw_inc in &include_paths {

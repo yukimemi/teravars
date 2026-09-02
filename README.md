@@ -30,7 +30,7 @@ resolve(&mut vars, &mut engine)?;            // iterate cross-refs to fixpoint
 let mut ctx: Context = system_context();     // system.os/arch/user/host
 ctx.insert("vars", &vars);
 
-let rendered = engine.render(&raw, &ctx)?;
+let rendered = engine.render_toml(&raw, &ctx)?;   // comments never rendered
 let cfg: MyConfig = toml::from_str(&rendered)?;
 ```
 
@@ -38,6 +38,35 @@ let cfg: MyConfig = toml::from_str(&rendered)?;
 `Err(Error::ResolveNotConverged { .. })` while leaving `vars` in its
 last partially-resolved state — callers that prefer resilience over
 strictness can `if let Err(_)` and continue with what's there.
+
+## Comments are inert
+
+A config file's `#` comments are stripped before Tera ever sees them, so a
+comment can say anything — including teravars syntax — without affecting the
+load:
+
+```toml
+# sample: port = "{{ vars.not_defined_yet }}"   # would be a render error
+# to disable the block below: {% if false %}    # would be "unexpected end of input"
+
+[vars] # app vars
+name = "app"
+# disabled = "{{ vars.gone }}"                  # not a var
+
+[server]
+url = "https://example.com/#anchor"             # `#` in a string is data
+```
+
+This is automatic in [`load_merged`](#multi-file-merge-feature-merge) and in
+`Engine::render_toml`. Plain `Engine::render` deliberately does **not** strip
+anything — it renders arbitrary text, where `#` carries no meaning. Reach for
+`strip_toml_comments` directly if you drive the render yourself.
+
+The scanner is TOML-aware, so a `#` that is not a comment survives: inside
+basic / literal strings, inside multi-line `"""` / `'''` strings, and inside
+Tera delimiters (`{{ … }}`, `{% … %}`, `{# … #}`). Only the bytes from `#` to
+end of line are dropped, so error messages keep pointing at the original line
+numbers.
 
 ## Multi-file merge (feature `merge`)
 

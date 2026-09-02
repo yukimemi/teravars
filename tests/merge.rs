@@ -539,3 +539,175 @@ include = ["base.toml"]
         "expected IncludeConflict, got: {err:?}"
     );
 }
+
+#[test]
+fn comments_are_inert_and_never_rendered() {
+    // Regression: a documented config file is full of commented-out samples
+    // and notes that quote teravars syntax. Rendering the file as a Tera
+    // template also rendered those comments, so `# port = "{{ vars.x }}"`
+    // failed with "field not defined" and `# disable: {% if false %}` with
+    // "unexpected end of input" — the whole load died on a comment.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+# sample: port = "{{ vars.not_defined }}"
+# to disable the block below: {% if false %}
+# {% endfor %} {{ broken |
+
+[vars] # app vars
+name = "app"
+# disabled = "{{ vars.also_not_defined }}"
+
+[server]
+title = "{{ vars.name }}"   # trailing note with {{ vars.nope }}
+url = "https://example.com/#anchor"
+"#,
+    );
+
+    let mut engine = Engine::new();
+    let merged = load_merged([&path], &mut engine, &system_context()).unwrap();
+
+    assert_eq!(
+        merged.vars.get("name").and_then(|v| v.as_str()),
+        Some("app")
+    );
+    assert!(
+        merged.vars.get("disabled").is_none(),
+        "a commented-out [vars] entry must not become a var"
+    );
+
+    let server = merged
+        .config
+        .get("server")
+        .and_then(|v| v.as_table())
+        .unwrap();
+    assert_eq!(server.get("title").and_then(|v| v.as_str()), Some("app"));
+    // A `#` inside a string is data, not a comment.
+    assert_eq!(
+        server.get("url").and_then(|v| v.as_str()),
+        Some("https://example.com/#anchor")
+    );
+}
+
+#[test]
+fn commented_out_include_is_not_loaded() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+# include = ["does-not-exist.toml"]
+include = ["base.toml"]   # only this one counts
+
+[vars]
+x = "1"
+"#,
+    );
+    write(&dir, "base.toml", "[vars]\ny = \"2\"\n");
+
+    let mut engine = Engine::new();
+    let merged = load_merged([&path], &mut engine, &system_context()).unwrap();
+
+    assert_eq!(merged.vars.get("x").and_then(|v| v.as_str()), Some("1"));
+    assert_eq!(merged.vars.get("y").and_then(|v| v.as_str()), Some("2"));
+}
+
+#[test]
+fn render_error_line_numbers_survive_comment_stripping() {
+    // Comment text is dropped but the lines it occupied are kept, so a real
+    // render failure still points at the line the author sees on disk.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+# note
+# note
+[server]
+title = "{{ vars.genuinely_missing }}"
+"#,
+    );
+
+    let mut engine = Engine::new();
+    let err = load_merged([&path], &mut engine, &system_context()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(":5:"),
+        "expected the error to point at line 5, got: {msg}"
+    );
+}
+
+/// Shaped like renri's real `renri.toml`: documented examples living in
+/// comments, a `#` inside prose, and the deferred `{{ vcs.* }}` idiom.
+#[test]
+fn consumer_shaped_config_with_documented_comments() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "renri.toml",
+        r#"
+# renri.toml — worktree config.
+# Surface the GitHub PR # next to each worktree in `renri list`.
+#
+# Example hook (uncomment to use):
+# [[hooks.post_create]]
+# type    = "command"
+# run     = "echo {{ vars.branch_slug }} {{ vcs.repo }}"
+# disable = {% if false %}
+
+[vars]
+port = "{{ 'main' | hash | port_offset(start=3000, range=100) }}"
+
+[ui]
+show_pr = true
+
+[layout]
+worktree_path = "{{ vcs.repo }}/{{ vcs.branch }}"
+
+[[hooks.post_create]]
+type = "command"
+run = "cargo make on-add --port {{ vars.port }}"
+"#,
+    );
+
+    let mut ctx = system_context();
+    // The documented deferred-template idiom: self-referential placeholders
+    // so `vcs.*` survives config load and renders in a later pass.
+    ctx.insert(
+        "vcs",
+        &serde_json::json!({ "repo": "{{ vcs.repo }}", "branch": "{{ vcs.branch }}" }),
+    );
+
+    let mut engine = Engine::new();
+    let merged = load_merged([&path], &mut engine, &ctx).unwrap();
+
+    let hooks = merged
+        .config
+        .get("hooks")
+        .and_then(|v| v.as_table())
+        .unwrap()
+        .get("post_create")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(hooks.len(), 1, "the commented-out hook must not be loaded");
+
+    let port: u32 = merged.vars["port"].as_str().unwrap().parse().unwrap();
+    assert!((3000..3100).contains(&port), "port was {port}");
+    assert_eq!(
+        hooks[0].get("run").and_then(|v| v.as_str()),
+        Some(format!("cargo make on-add --port {port}").as_str())
+    );
+
+    let layout = merged
+        .config
+        .get("layout")
+        .and_then(|v| v.as_table())
+        .unwrap();
+    assert_eq!(
+        layout.get("worktree_path").and_then(|v| v.as_str()),
+        Some("{{ vcs.repo }}/{{ vcs.branch }}"),
+        "deferred vcs.* placeholders must survive the load pass"
+    );
+}
