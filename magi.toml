@@ -1,0 +1,93 @@
+# magi on teravars: pre-merge review, competition when a task is worth one.
+#
+# Rendered by teravars itself, so this file is also a live dogfood of
+# `load_merged` + `[vars]`. Careful: magi still depends on teravars 0.2.1,
+# where Tera braces are live in comments too — quoting an expression in a
+# comment here fails the config load until magi bumps to 0.2.2, which strips
+# comments before rendering.
+
+[vars]
+# Shared build cache for the verification commands. Override per machine with
+# MAGI_CACHE.
+cache = "{{ env.MAGI_CACHE | default(value='/tmp') }}"
+
+[[agents]]
+id = "opus"
+kind = "claude"
+model = "opus"
+
+[[agents]]
+id = "sonnet"
+kind = "claude"
+model = "sonnet"
+
+[[agents]]
+id = "oc"
+kind = "opencode"
+
+[[agents]]
+id = "agy"
+kind = "antigravity"
+
+[roles]
+# Same cost shape as the magi repo's own roster: the expensive model judges and
+# reviews (a handful of turns), the free CLIs carry the implementation load,
+# where the tool-loop turns — and therefore the cache-read bill — actually are.
+implementers = ["oc", "agy", "sonnet"]
+judges = ["opus", "oc", "agy"]
+reviewers = ["sonnet", "oc"]
+fixer = "sonnet"
+
+[graph]
+candidates = 3
+judges = 3
+deliberate_rounds = 1
+reviewers = 2
+review_rounds = 3
+max_parallel = 3
+language = "ja"
+sessions = true
+
+[verify]
+# The real-machine leg. `--all-features` on purpose: `merge` and `shell` are
+# off by default, so a default-feature-only test run cannot see `load_merged`,
+# the `include` directive, or the shell helpers at all — which is most of the
+# integration suite (`tests/merge.rs` is `#![cfg(feature = "merge")]` and is
+# skipped entirely without it, including in CI).
+e2e = [
+  "CARGO_TARGET_DIR={{ vars.cache }}/magi-target cargo test --locked --all-targets --all-features",
+]
+# Same gate as CI and the pre-push hook.
+gate = ["CARGO_TARGET_DIR={{ vars.cache }}/magi-target cargo make check"]
+
+[merge]
+mode = "none"
+# Required in every jj-colocated repo: jj keeps git's HEAD detached at the
+# working-copy commit, so magi cannot infer the base branch from
+# `git symbolic-ref HEAD`.
+base = "main"
+
+[update]
+mode = "notify"
+
+[prompts]
+all = """
+This repository uses jj (Jujutsu) with a colocated git repo. `git commit` works \
+in a candidate worktree and is what magi expects, but never run `jj` commands \
+and never touch the main working copy.
+teravars is a library: prefer an additive API change over a breaking one, and \
+when breaking is unavoidable, say which consumer it breaks (renri today; yui, \
+rvpm, todoke, shun, spyrun are queued in ROADMAP.md).
+Features gate the test surface: run `cargo test --all-features`, since `merge` \
+and `shell` are off by default.
+"""
+review = """
+Formatting is not a finding: `cargo fmt` runs in the gate. Spend the round on \
+correctness of the text scanners (`extract_vars`, `strip_toml_comments`, \
+`strip_tera_blocks`), on TOML/Tera edge cases they claim to handle, and on \
+whether an error is surfaced with its real cause instead of tera's bare \
+`__tera_one_off` message.
+A silent corruption is worse than a loud failure here: the library rewrites \
+config text, so a scanner that mis-parses and drops bytes must be treated as \
+more serious than one that errors out.
+"""

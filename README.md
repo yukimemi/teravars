@@ -14,7 +14,7 @@
 
 ---
 
-**Status: 0.1.3 — core + multi-file merge + `include` directive + `hash` / `port_offset` filters shipped. Migration of the 5 sibling tools is the next step; see [ROADMAP.md](https://github.com/yukimemi/teravars/blob/master/ROADMAP.md).**
+**Status: 0.2.2 — core + multi-file merge + `include` directive + `hash` / `port_offset` filters + TOML-comment stripping shipped. [renri](https://github.com/yukimemi/renri) and [magi](https://github.com/yukimemi/magi) consume it today; migration of the remaining sibling tools is the next step, see [ROADMAP.md](https://github.com/yukimemi/teravars/blob/main/ROADMAP.md).**
 
 ## Quickstart
 
