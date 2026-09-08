@@ -1,75 +1,75 @@
 # magi on teravars: pre-merge review, competition when a task is worth one.
 #
-# Rendered by teravars itself, so this file is also a live dogfood of
-# `load_merged` + `[vars]`. Careful: magi still depends on teravars 0.2.1,
-# where Tera braces are live in comments too — quoting an expression in a
-# comment here fails the config load until magi bumps to 0.2.2, which strips
-# comments before rendering.
+# **Only what is peculiar to this checkout lives here.** The roster, the seat
+# assignment, the shape of a run and the update policy live in the machine
+# layer (`<config_dir>/magi/config.toml`), because none of them are facts
+# about this repository: they are facts about which agent CLIs are installed
+# and what the operator is willing to spend. Stating them once there is the
+# point of having layers, and it keeps this file to the things a different
+# machine would still need to be told.
+#
+# What that leaves, and why each one has to be here:
+#
+# - `[verify]` runs `cargo`. A repository that is not Rust cannot inherit it,
+#   and `gate` in particular has to match `.github/workflows/ci.yml` exactly:
+#   a gate looser than CI is the one failure this whole setup cannot absorb —
+#   a clean `magi run` that still turns into a red PR.
+# - `[merge] base` names this repository's default branch, and is required at
+#   all because of how this checkout is set up (see below).
+# - `[prompts]` are this project's conventions.
+#
+# Note that an array may be declared in exactly one layer
+# (`Config::refuse_split_arrays`). The roster (`[[agents]]`) and `[roles]`'s
+# lists already live in the machine layer, so they must not be restated here
+# — same reason `[graph]` and `[update]` stay there too: none of them are
+# facts about this checkout.
+#
+# Rendered by teravars itself. Tera braces are live everywhere in this file,
+# but comments are stripped before Tera sees them (teravars >= 0.2.2), so a
+# comment may quote `{{ ... }}` freely.
 
 [vars]
 # Shared build cache for the verification commands. Override per machine with
-# MAGI_CACHE.
+# MAGI_CACHE. Lives beside its only consumer: `[vars]` is rendered per file,
+# so a value used by this file's templates is stated in this file.
 cache = "{{ env.MAGI_CACHE | default(value='/tmp') }}"
 
-[[agents]]
-id = "opus"
-kind = "claude"
-model = "opus"
-
-[[agents]]
-id = "sonnet"
-kind = "claude"
-model = "sonnet"
-
-[[agents]]
-id = "oc"
-kind = "opencode"
-
-[[agents]]
-id = "agy"
-kind = "antigravity"
-
-[roles]
-# Same cost shape as the magi repo's own roster: the expensive model judges and
-# reviews (a handful of turns), the free CLIs carry the implementation load,
-# where the tool-loop turns — and therefore the cache-read bill — actually are.
-implementers = ["oc", "agy", "sonnet"]
-judges = ["opus", "oc", "agy"]
-reviewers = ["sonnet", "oc"]
-fixer = "sonnet"
-
-[graph]
-candidates = 3
-judges = 3
-deliberate_rounds = 1
-reviewers = 2
-review_rounds = 3
-max_parallel = 3
-language = "ja"
-sessions = true
-
 [verify]
-# The real-machine leg. `--all-features` on purpose: `merge` and `shell` are
-# off by default, so a default-feature-only test run cannot see `load_merged`,
-# the `include` directive, or the shell helpers at all — which is most of the
-# integration suite (`tests/merge.rs` is `#![cfg(feature = "merge")]` and is
-# skipped entirely without it, including in CI).
-e2e = [
-  "CARGO_TARGET_DIR={{ vars.cache }}/magi-target cargo test --locked --all-targets --all-features",
-]
-# Same gate as CI and the pre-push hook.
-gate = ["CARGO_TARGET_DIR={{ vars.cache }}/magi-target cargo make check"]
+# The real-machine leg, run in the winner's worktree once per review round;
+# its output goes to the fixer.
+#
+# CARGO_TARGET_DIR is shared on purpose: each candidate worktree would
+# otherwise compile this crate from scratch, which is by far the slowest
+# thing in a review round on a Rust repo. Only the winner's worktree runs
+# these commands, and only one at a time, so nothing contends on cargo's lock.
+e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo test --locked --all-targets"]
+# The final gate before merge. Must match the set `.github/workflows/ci.yml`
+# runs. `Makefile.toml`'s `[tasks.check]` already advertises itself as "same
+# as CI" and lists its dependencies as editorconfig-check + fmt-check +
+# clippy + test + lock-check, which line up with ci.yml's editorconfig / fmt
+# / clippy / test / lockfile jobs (lock-check's `cargo check --locked
+# --all-targets` also covers the plain `check` job, since anything that
+# compiles --locked also compiles unlocked). editorconfig-check is present on
+# both sides, which is the state that matters — it would be just as correct
+# for neither side to have it, but one side without the other is exactly the
+# drift this gate exists to prevent. So the gate is `cargo make check`.
+#
+# ci.yml's `coverage` job (cargo llvm-cov + Codecov upload) is deliberately
+# left out: it uploads to an external service and is explicitly configured
+# not to fail the build (`fail_ci_if_error: false`), so it can never turn a
+# clean magi run into a red PR — the one thing this gate has to prevent.
+gate = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo make check"]
 
 [merge]
 mode = "none"
-# Required in every jj-colocated repo: jj keeps git's HEAD detached at the
-# working-copy commit, so magi cannot infer the base branch from
+# Required here, and in every jj-colocated repo: jj keeps git's HEAD detached
+# at the working-copy commit, so magi cannot infer the base branch from
 # `git symbolic-ref HEAD`.
 base = "main"
 
-[update]
-mode = "notify"
-
+# Project conventions appended to the node prompts, never merged into them.
+# Repository-wide context lives in AGENTS.md, which every agent already reads
+# from the checkout; these are the things a magi *node* needs to know.
 [prompts]
 all = """
 This repository uses jj (Jujutsu) with a colocated git repo. `git commit` works \
@@ -78,8 +78,9 @@ and never touch the main working copy.
 teravars is a library: prefer an additive API change over a breaking one, and \
 when breaking is unavoidable, say which consumer it breaks (renri today; yui, \
 rvpm, todoke, shun, spyrun are queued in ROADMAP.md).
-Features gate the test surface: run `cargo test --all-features`, since `merge` \
-and `shell` are off by default.
+Features gate the test surface: `merge` and `shell` are off by default, so the \
+automated `verify.e2e` / `verify.gate` legs never exercise `tests/merge.rs` or \
+the shell helpers. Run `cargo test --all-features` by hand when touching either.
 """
 review = """
 Formatting is not a finding: `cargo fmt` runs in the gate. Spend the round on \
