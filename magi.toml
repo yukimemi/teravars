@@ -49,26 +49,29 @@ e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo test --locked --
 # clippy + test + lock-check, which line up with ci.yml's editorconfig / fmt
 # / clippy / test / lockfile jobs (lock-check's `cargo check --locked
 # --all-targets` also covers the plain `check` job, since anything that
-# compiles --locked also compiles unlocked).
+# compiles --locked also compiles unlocked). editorconfig-check is present on
+# both sides, which is the state that matters — it would be just as correct
+# for neither side to have it, but one side without the other is exactly the
+# drift this gate exists to prevent. So the gate is `cargo make check`.
 #
 # `[tasks.editorconfig-check]` itself degrades to a no-op when the
 # `editorconfig-checker` binary isn't on the gate machine's PATH ("skipped
 # locally ... still enforced in CI", per its own description), while
-# ci.yml's `editorconfig` job always installs and runs it. `cargo make
-# check` alone would silently inherit that soft-skip, so a gate machine
-# without the binary would pass a `.editorconfig` violation that CI rejects
-# — exactly the "clean magi run, red PR" failure this file exists to
-# prevent. Running `editorconfig-checker` directly first turns a missing
-# binary into a hard gate failure instead of a silent skip.
+# ci.yml's `editorconfig` job always installs it via a dedicated Action step.
+# Calling the bare binary directly from this gate to force that check was
+# tried and reverted: unlike CI, nothing here provisions the tool, so on a
+# gate machine that never had it installed the command itself is missing
+# (exit 127) — a hard failure unrelated to any actual `.editorconfig`
+# violation, and worse than the soft-skip it was meant to replace. Closing
+# that gap for real means the gate machine has `editorconfig-checker`
+# installed (see the task's own install link), not something this file can
+# paper over on its own.
 #
 # ci.yml's `coverage` job (cargo llvm-cov + Codecov upload) is deliberately
 # left out: it uploads to an external service and is explicitly configured
 # not to fail the build (`fail_ci_if_error: false`), so it can never turn a
 # clean magi run into a red PR — the one thing this gate has to prevent.
-gate = [
-  "editorconfig-checker",
-  "CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo make check",
-]
+gate = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo make check"]
 
 [merge]
 mode = "none"
