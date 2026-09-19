@@ -64,9 +64,6 @@ once_applied = true
 [files."AGENTS.md"]
 content_hash = "97f5d5ab377fc6592f391087f538ec07480e9efd4a04ffd79de67453a09bc2ee"
 
-[files."CLAUDE.md"]
-content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
-
 [files."GEMINI.md"]
 content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390"
 
