@@ -54,18 +54,10 @@ e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo test --locked --
 # for neither side to have it, but one side without the other is exactly the
 # drift this gate exists to prevent. So the gate is `cargo make check`.
 #
-# `[tasks.editorconfig-check]` itself degrades to a no-op when the
-# `editorconfig-checker` binary isn't on the gate machine's PATH ("skipped
-# locally ... still enforced in CI", per its own description), while
-# ci.yml's `editorconfig` job always installs it via a dedicated Action step.
-# Calling the bare binary directly from this gate to force that check was
-# tried and reverted: unlike CI, nothing here provisions the tool, so on a
-# gate machine that never had it installed the command itself is missing
-# (exit 127) — a hard failure unrelated to any actual `.editorconfig`
-# violation, and worse than the soft-skip it was meant to replace. Closing
-# that gap for real means the gate machine has `editorconfig-checker`
-# installed (see the task's own install link), not something this file can
-# paper over on its own.
+# editorconfig is enforced by CI's `editorconfig` job only, not by this gate:
+# tools that must be installed on a specific machine stay in GHA. The
+# `editorconfig-check` task inside `cargo make check` no-ops when the binary
+# is missing, which is fine here.
 #
 # ci.yml's `coverage` job (cargo llvm-cov + Codecov upload) is deliberately
 # left out: it uploads to an external service and is explicitly configured
@@ -74,7 +66,6 @@ e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo test --locked --
 gate = ["CARGO_TARGET_DIR={{ vars.cache }}/teravars-target cargo make check"]
 
 [merge]
-mode = "none"
 # Required here, and in every jj-colocated repo: jj keeps git's HEAD detached
 # at the working-copy commit, so magi cannot infer the base branch from
 # `git symbolic-ref HEAD`.
