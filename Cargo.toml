@@ -20,7 +20,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 tera = "2.4.0"
-toml = "1.1.7"
+toml = "1.1.8"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 whoami = "2.1.3"
