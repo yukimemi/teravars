@@ -13,7 +13,7 @@ version = "0.8.1"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust-lib"
-rev = "37a5a4b576d8dd14cc175ec85ee34a6facd883ce"
+rev = "76fa2cc6d8823da43bb86c87e5ee98cb914b8d07"
 version = "0.1.0"
 
 [files.".agents/skills/renri/SKILL.md"]
