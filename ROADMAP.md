@@ -1,7 +1,7 @@
 # teravars — ROADMAP
 
 Survey of how each yukimemi/* tool currently uses Tera, and the union
-of features `teravars` should provide so all five can drop their
+of features `teravars` should provide so these tools can drop their
 local copy.
 
 ---
@@ -59,17 +59,6 @@ local copy.
 - Tera error chain walked manually so `Failed to render '__tera_one_off'`
   carries the actual cause string.
 
-### spyrun (`spyrun/src/util.rs`)
-
-- Largest helper set. `register_function`:
-  - `env(name=)` — read env var
-  - `setenv(name=, value=)` — set env var
-  - `enc(text=)` / `dec(text=)` — string encode / decode
-  - `ps(script=)` — run a PowerShell snippet, capture stdout
-  - `psf(file=)` — run a `.ps1` file, capture stdout
-- Custom `Context` per call site (no shared standard context).
-- Uses Tera throughout (settings, command, logger, util).
-
 ---
 
 ## Union — what teravars should expose
@@ -81,7 +70,7 @@ local copy.
 | `Engine` | Tera engine + opinionated helper set | yui |
 | `Engine::new()` | default helpers preloaded | yui |
 | `Engine::new_minimal()` | bare Tera, no helpers | shun |
-| `Engine::register_function(name, fn)` | add custom helper | spyrun |
+| `Engine::register_function(name, fn)` | add custom helper | — |
 | `Engine::render(src, ctx)` | render with a clean Tera error chain (no bare `Failed to render '__tera_one_off'`) | yui |
 | `Engine::render_str(src, ctx)` | thin pass-through for one-offs | shun |
 | `extract_vars(text) -> Table` | text-based `[vars]` extraction (handles `[vars.sub]`, skips `{% %}` blocks) | rvpm + yui |
@@ -93,11 +82,8 @@ local copy.
 
 | name | sig | source |
 |---|---|---|
-| `env(name=, default=?)` | read env var with optional fallback | yui / spyrun |
+| `env(name=, default=?)` | read env var with optional fallback | yui |
 | `is_windows()` / `is_linux()` / `is_mac()` | OS predicate functions | todoke / rvpm |
-| `setenv(name=, value=)` | set env var (returns empty string) | spyrun |
-| `enc(text=)` / `dec(text=)` | escape helpers (URL? base64? — spec to confirm) | spyrun |
-| `ps(script=)` / `psf(file=)` | run PowerShell, capture stdout — gated `cfg(windows)` | spyrun |
 
 ### Standard context
 
@@ -147,8 +133,6 @@ In rough size order:
    confirm behaviour parity.
 3. **todoke** — small surface; mostly the `is_*` helpers + extract_vars.
 4. **shun** — switches from `Tera::one_off` to `Engine::render_str`.
-5. **spyrun** — biggest helper surface; needs `enc` / `dec` / `ps` /
-   `psf` semantic carry-over and Windows-gated tests.
 
 Each migration is its own PR per project, tracking duplication
 removal.

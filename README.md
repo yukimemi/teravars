@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Extracted from the duplicated patterns in <a href="https://github.com/yukimemi/shun">shun</a> / <a href="https://github.com/yukimemi/rvpm">rvpm</a> / <a href="https://github.com/yukimemi/todoke">todoke</a> / <a href="https://github.com/yukimemi/yui">yui</a> / <a href="https://github.com/yukimemi/spyrun">spyrun</a>.
+  Extracted from the duplicated patterns in <a href="https://github.com/yukimemi/shun">shun</a> / <a href="https://github.com/yukimemi/rvpm">rvpm</a> / <a href="https://github.com/yukimemi/todoke">todoke</a> / <a href="https://github.com/yukimemi/yui">yui</a>.
 </p>
 
 ---
@@ -160,4 +160,3 @@ Same as the parent projects: MIT.
 [rvpm]: https://github.com/yukimemi/rvpm
 [todoke]: https://github.com/yukimemi/todoke
 [yui]: https://github.com/yukimemi/yui
-[spyrun]: https://github.com/yukimemi/spyrun
