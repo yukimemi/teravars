@@ -260,6 +260,69 @@ api_url = "https://api.{{ vars.domain }}"
 }
 
 #[test]
+fn include_supplies_vars_for_bare_tera_expression() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        "[vars]\ngui = \"desktop\"\nwrapper_guis = [\"desktop\"]\n",
+    );
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"include = ["machine.toml"]
+
+[todoke.gui]
+gui = {{ vars.gui in vars.wrapper_guis }}
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["todoke"]["gui"]["gui"].as_bool(), Some(true));
+}
+
+#[test]
+fn include_in_a_conditionally_opened_table_is_not_a_directive() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if true %}
+[app]
+{% endif %}
+include = ["not-a-file-to-load.toml"]
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("not-a-file-to-load.toml")
+    );
+}
+
+#[test]
+fn malformed_include_reports_the_owning_file_before_loading_paths() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        "[teravars]\ninclude = ['missing.toml', 42]\n",
+    );
+    let main = write(&dir, "config.toml", "include = ['machine.toml']\n");
+
+    let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+    let Error::Extract(message) = err else {
+        panic!("expected an include diagnostic, got: {err}");
+    };
+    assert!(
+        message.contains("machine.toml `teravars.include`"),
+        "{message}"
+    );
+    assert!(message.contains("expected a string"), "{message}");
+}
+
+#[test]
 fn include_strips_directive_from_merged_config() {
     let dir = TempDir::new().unwrap();
     write(&dir, "base.toml", "[vars]\na = \"1\"\n");

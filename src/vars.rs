@@ -97,17 +97,15 @@ pub(crate) struct TagScan {
     pub unterminated: bool,
 }
 
-pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
-    const OPENERS: &[&str] = &["if", "for", "block", "macro", "filter", "raw"];
-    const CLOSERS: &[&str] = &[
-        "endif",
-        "endfor",
-        "endblock",
-        "endmacro",
-        "endfilter",
-        "endraw",
-    ];
+pub(crate) fn tera_block_delta(keyword: &str) -> i8 {
+    match keyword {
+        "if" | "for" | "block" | "macro" | "filter" | "raw" => 1,
+        "endif" | "endfor" | "endblock" | "endmacro" | "endfilter" | "endraw" => -1,
+        _ => 0,
+    }
+}
 
+pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
     let mut opens = 0;
     let mut closes = 0;
     let mut unterminated = false;
@@ -119,10 +117,10 @@ pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
             Some(end) => {
                 let body = after[..end].trim();
                 let first = body.split_whitespace().next().unwrap_or("");
-                if OPENERS.contains(&first) {
-                    opens += 1;
-                } else if CLOSERS.contains(&first) {
-                    closes += 1;
+                match tera_block_delta(first) {
+                    1 => opens += 1,
+                    -1 => closes += 1,
+                    _ => {}
                 }
                 s = &after[end + 2..];
             }

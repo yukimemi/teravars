@@ -181,18 +181,11 @@ impl Scanner {
                     } else {
                         b"%}"
                     };
-                    match self.tera_quote {
-                        Some(quote) => {
-                            if b[i] == quote {
-                                self.tera_quote = None;
-                            }
-                            i += 1;
-                        }
-                        None if matches!(b[i], b'"' | b'\'' | b'`') => {
-                            self.tera_quote = Some(b[i]);
-                            i += 1;
-                        }
-                        None => i += self.close(b, i, delim),
+                    if let Some(end) = scan_tera_body(b, i, delim, &mut self.tera_quote) {
+                        self.state = State::Normal;
+                        i = end;
+                    } else {
+                        break;
                     }
                 }
                 // A Tera comment's body is arbitrary text — no string
@@ -242,6 +235,28 @@ impl Scanner {
             self.state = State::Normal;
         }
         run
+    }
+}
+
+fn scan_tera_body(b: &[u8], mut i: usize, delim: &[u8], quote: &mut Option<u8>) -> Option<usize> {
+    while i < b.len() {
+        match *quote {
+            Some(open) if b[i] == open => *quote = None,
+            None if matches!(b[i], b'"' | b'\'' | b'`') => *quote = Some(b[i]),
+            None if at(b, i, delim) => return Some(i + delim.len()),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(feature = "merge")]
+pub(crate) fn tera_tag_end(body: &str, delim: &[u8]) -> Option<usize> {
+    if delim == b"#}" {
+        body.find("#}").map(|i| i + 2)
+    } else {
+        scan_tera_body(body.as_bytes(), 0, delim, &mut None)
     }
 }
 
