@@ -282,6 +282,77 @@ gui = {{ vars.gui in vars.wrapper_guis }}
 }
 
 #[test]
+fn namespaced_include_after_bare_expression_supplies_vars_before_root_overrides() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        r#"[vars]
+gui = "terminal"
+wrapper_guis = ["desktop"]
+
+[todoke.gui]
+source = "machine"
+"#,
+    );
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"[todoke.gui]
+gui = {{ vars.gui in vars.wrapper_guis }}
+source = "root"
+
+[teravars]
+include = ["machine.toml"]
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    let gui = &merged.config["todoke"]["gui"];
+    assert_eq!(gui["gui"].as_bool(), Some(false));
+    assert_eq!(gui["source"].as_str(), Some("root"));
+}
+
+#[test]
+fn include_like_text_is_not_loaded_and_table_local_include_is_preserved() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r###"# include = ["missing-comment.toml"]
+{# include = ["missing-tera-comment.toml"] #}
+include = ["machine.toml"]
+
+doc = """
+include = ["missing-basic.toml"]
+[teravars]
+include = ["missing-namespace.toml"]
+"""
+literal = '''
+include = ["missing-literal.toml"]
+'''
+nested = { include = ["missing-inline.toml"] }
+
+{% if false %}
+include = ["missing-conditional.toml"]
+{% endif %}
+
+[app]
+include = ["missing-table-local.toml"]
+ready = {{ vars.ready }}
+"###,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["app"]["ready"].as_bool(), Some(true));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("missing-table-local.toml")
+    );
+}
+
+#[test]
 fn include_in_a_conditionally_opened_table_is_not_a_directive() {
     let dir = TempDir::new().unwrap();
     let main = write(
@@ -320,6 +391,25 @@ fn malformed_include_reports_the_owning_file_before_loading_paths() {
         "{message}"
     );
     assert!(message.contains("expected a string"), "{message}");
+}
+
+#[test]
+fn root_include_requires_an_array_not_a_string_or_bare_expression() {
+    let dir = TempDir::new().unwrap();
+    for (name, text) in [
+        ("scalar.toml", r#"include = "machine.toml""#),
+        ("expression.toml", "include = {{ vars.paths }}"),
+    ] {
+        let main = write(&dir, name, text);
+        let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+        let Error::Extract(message) = err else {
+            panic!("expected an include diagnostic, got: {err}");
+        };
+        assert!(
+            message.contains(&format!("{name} `include`: ")),
+            "{message}"
+        );
+    }
 }
 
 #[test]

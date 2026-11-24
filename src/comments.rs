@@ -251,13 +251,16 @@ fn scan_tera_body(b: &[u8], mut i: usize, delim: &[u8], quote: &mut Option<u8>) 
     None
 }
 
-#[cfg(feature = "merge")]
 pub(crate) fn tera_tag_end(body: &str, delim: &[u8]) -> Option<usize> {
     if delim == b"#}" {
         body.find("#}").map(|i| i + 2)
     } else {
         scan_tera_body(body.as_bytes(), 0, delim, &mut None)
     }
+}
+
+pub(crate) fn trim_tera_tag(body: &str) -> &str {
+    body.trim_matches(|c: char| c.is_whitespace() || c == '-')
 }
 
 /// Recognize a delimiter that opens a non-`Normal` state at `i`.

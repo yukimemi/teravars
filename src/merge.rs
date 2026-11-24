@@ -315,6 +315,7 @@ include = ["should-not-appear.toml"]
 include = ["nested.toml"]
 {% endif -%}
 {%- endif %}
+{% if true %} include = ["same-line.toml"] {% endif %}
 {% set captured | replace(from="a", to="b") %}
 [captured]
 include = ["captured.toml"]
@@ -349,17 +350,18 @@ include = ["tera-comment.toml"]
 #}
 example = '''
 include = ["literal-string.toml"]
-'''
+''''
 example_basic = """
 [teravars]
 include = ["basic-string.toml"]
-"""
+""""
 example_expr = {{ `}}
 include = ["tera-expression.toml"]
 ` }}
 entries = [{
     include = ["inline-member.toml"]
 }]
+"teravars.include" = ["quoted-single-key.toml"]
 teravars = { nested = { include = ["nested-member.toml"] } }
 
 [app]
@@ -371,6 +373,18 @@ include = ["array-table.toml"]
 "###;
         let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn extract_include_paths_ignores_keys_under_nested_or_dynamic_headers() {
+        for header in ["[teravars.sub]", "[{{ vars.dynamic_table }}]"] {
+            let text = format!("{header}\ninclude = [\"table-local.toml\"]");
+            let paths = extract_include_paths(&text, Path::new("dummy")).unwrap();
+            assert!(
+                paths.is_empty(),
+                "unexpected includes under {header}: {paths:?}"
+            );
+        }
     }
 
     #[test]
@@ -404,6 +418,26 @@ include = ["array-table.toml"]
             assert!(
                 message.starts_with(&format!("broken.toml `{directive}`: ")),
                 "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_include_paths_rejects_duplicate_declarations() {
+        for (text, directive) in [
+            ("include = []\n'include' = [\"b.toml\"]", "include"),
+            (
+                "teravars.include = []\n[teravars]\ninclude = [\"b.toml\"]",
+                "teravars.include",
+            ),
+        ] {
+            let error = extract_include_paths(text, Path::new("duplicate.toml")).unwrap_err();
+            let Error::Extract(message) = error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(
+                message,
+                format!("duplicate.toml `{directive}`: duplicate declaration")
             );
         }
     }

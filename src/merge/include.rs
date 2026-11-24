@@ -8,7 +8,7 @@ use toml_parser::lexer::{Lexer, TokenKind};
 use toml_parser::{ParseError, Source, Span};
 
 use crate::Result;
-use crate::comments::tera_tag_end;
+use crate::comments::{tera_tag_end, trim_tera_tag};
 use crate::error::Error;
 use crate::vars::tera_block_delta;
 
@@ -267,7 +267,7 @@ impl<'a> Iterator for Tokens<'a> {
                     let tag_end = tera_tag_end(body, delim);
                     self.offset = start + 2 + tag_end.unwrap_or(body.len());
                     if let Some(end) = tag_end.filter(|_| delim == b"%}") {
-                        let tag = trim_tag(&body[..end - 2]);
+                        let tag = trim_tera_tag(&body[..end - 2]);
                         let (keyword, args) =
                             tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
                         if keyword == "raw" {
@@ -323,10 +323,6 @@ impl<'a> Iterator for Tokens<'a> {
         }
         None
     }
-}
-
-fn trim_tag(tag: &str) -> &str {
-    tag.trim_matches(|c: char| c.is_whitespace() || c == '-')
 }
 
 fn block_delta(keyword: &str, args: &str) -> i8 {
