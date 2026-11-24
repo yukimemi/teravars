@@ -15,15 +15,45 @@ use crate::vars::tera_block_delta;
 const ROOT: &str = "include";
 const NAMESPACED: &str = "teravars.include";
 
+#[derive(Debug)]
+pub(super) struct Includes {
+    pub(super) paths: Vec<String>,
+    name: Option<&'static str>,
+    ambiguous: bool,
+}
+
+impl Includes {
+    pub(super) fn check_rendered(&self, parsed: &toml::Table, path: &Path) -> Result<()> {
+        if !self.ambiguous {
+            return Ok(());
+        }
+        let namespaced = parsed
+            .get("teravars")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key(ROOT));
+        for (name, exists) in [(ROOT, parsed.contains_key(ROOT)), (NAMESPACED, namespaced)] {
+            if exists && self.name != Some(name) {
+                return Err(invalid(
+                    path,
+                    name,
+                    "owning table depends on Tera control flow",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // Locate static assignments in the source without requiring unrelated
 // template values to be valid TOML before rendering.
-pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
+pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes> {
     use TokenKind::*;
 
     let mut tokens = Tokens::new(text).peekable();
     let mut section = Section::Root;
     let mut root = None;
     let mut namespaced = None;
+    let mut ambiguous = false;
 
     while let Some(first) = tokens.next() {
         let owner = match first.kind {
@@ -31,8 +61,9 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<Strin
             LeftSquareBracket => {
                 // A conditional header may change the active table. Only
                 // another static header can make the scope definite again.
-                section = if first.block_depth == 0
-                    && take_key(&mut tokens, "teravars")
+                section = if first.block_depth != 0 {
+                    Section::Ambiguous
+                } else if take_key(&mut tokens, "teravars")
                     && take(&mut tokens, RightSquareBracket).is_some()
                     && tokens.peek().is_none_or(|t| t.kind == Newline)
                 {
@@ -50,9 +81,15 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<Strin
             _ if first.is_key(ROOT) => match section {
                 Section::Root => Some((&mut root, ROOT)),
                 Section::Teravars => Some((&mut namespaced, NAMESPACED)),
+                Section::Ambiguous => {
+                    ambiguous |= take(&mut tokens, Equals).is_some();
+                    None
+                }
                 Section::Other => None,
             },
-            _ if matches!(section, Section::Root) && first.is_key("teravars") => {
+            _ if matches!(section, Section::Root | Section::Ambiguous)
+                && first.is_key("teravars") =>
+            {
                 if take(&mut tokens, Dot).is_some() {
                     take_key(&mut tokens, ROOT).then_some((&mut namespaced, NAMESPACED))
                 } else {
@@ -60,7 +97,11 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<Strin
                         && take(&mut tokens, LeftCurlyBracket).is_some()
                     {
                         if let Some(value) = inline_include(text, &mut tokens, path)? {
-                            record(&mut namespaced, value, path, NAMESPACED)?;
+                            if matches!(section, Section::Ambiguous) {
+                                ambiguous = true;
+                            } else {
+                                record(&mut namespaced, value, path, NAMESPACED)?;
+                            }
                         }
                     }
                     None
@@ -74,7 +115,11 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<Strin
         {
             let start = eq.end;
             let end = value_end(&mut tokens, &eq, false);
-            record(slot, &text[start..end], path, name)?;
+            if matches!(section, Section::Ambiguous) {
+                ambiguous = true;
+            } else {
+                record(slot, &text[start..end], path, name)?;
+            }
         } else {
             value_end(&mut tokens, &first, false);
         }
@@ -86,19 +131,29 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<Strin
                 path: path.to_path_buf(),
             });
         }
-        (Some(value), None) => (value, ROOT),
-        (None, Some(value)) => (value, NAMESPACED),
-        (None, None) => return Ok(Vec::new()),
+        (Some(value), None) => (Some(value), Some(ROOT)),
+        (None, Some(value)) => (Some(value), Some(NAMESPACED)),
+        (None, None) => (None, None),
     };
-    ValueDeserializer::parse(value.trim_matches([' ', '\t', '\r', '\n']))
-        .and_then(Vec::<String>::deserialize)
-        .map_err(|err| invalid(path, name, err))
+    let paths = if let (Some(value), Some(name)) = (value, name) {
+        ValueDeserializer::parse(value.trim_matches([' ', '\t', '\r', '\n']))
+            .and_then(Vec::<String>::deserialize)
+            .map_err(|err| invalid(path, name, err))?
+    } else {
+        Vec::new()
+    };
+    Ok(Includes {
+        paths,
+        name,
+        ambiguous,
+    })
 }
 
 enum Section {
     Root,
     Teravars,
     Other,
+    Ambiguous,
 }
 
 fn inline_include<'a>(
@@ -170,19 +225,29 @@ fn value_end(tokens: &mut Peekable<Tokens<'_>>, start: &Lexeme<'_>, inline: bool
 
     let mut end = start.end;
     let mut depth = 0usize;
-    while let Some(token) = tokens.next_if(|t| match t.block_depth.cmp(&start.block_depth) {
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Equal => {
-            depth != 0
-                || if inline {
-                    !matches!(t.kind, Comma | RightCurlyBracket)
-                } else {
-                    t.kind != Newline
-                }
+    let mut nesting_block = start.block_depth;
+    while let Some(token) = tokens.peek() {
+        if token.block_depth < start.block_depth {
+            break;
         }
-    }) {
-        if token.block_depth != start.block_depth || token.kind == Newline {
+        if token.block_depth < nesting_block {
+            depth = 0;
+        }
+        if depth == 0
+            && if inline {
+                token.block_depth == start.block_depth
+                    && matches!(token.kind, Comma | RightCurlyBracket)
+            } else {
+                token.kind == Newline
+            }
+        {
+            break;
+        }
+        let token = tokens.next().unwrap();
+        if depth == 0 {
+            nesting_block = token.block_depth;
+        }
+        if token.block_depth != nesting_block || token.kind == Newline {
             continue;
         }
         match token.kind {
@@ -228,6 +293,7 @@ struct Tokens<'a> {
     offset: usize,
     block_depth: usize,
     capture_depth: Option<usize>,
+    branches: Vec<Branch>,
 }
 
 impl<'a> Tokens<'a> {
@@ -238,7 +304,49 @@ impl<'a> Tokens<'a> {
             offset: 0,
             block_depth: 0,
             capture_depth: None,
+            branches: Vec::new(),
         }
+    }
+
+    fn live(&self) -> bool {
+        self.branches.last().is_none_or(|branch| branch.live)
+    }
+
+    fn branch_tag(&mut self, keyword: &str, args: &str) {
+        match keyword {
+            "if" => {
+                let mut branch = Branch {
+                    live: false,
+                    fallthrough: self.live(),
+                };
+                branch.arm(args);
+                self.branches.push(branch);
+            }
+            "elif" | "else" => {
+                if let Some(branch) = self.branches.last_mut() {
+                    branch.arm(if keyword == "else" { "true" } else { args });
+                }
+            }
+            "endif" => {
+                self.branches.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+// Unknown expressions may take either arm. Never evaluate them without the
+// variables that the include itself might provide.
+struct Branch {
+    live: bool,
+    fallthrough: bool,
+}
+
+impl Branch {
+    fn arm(&mut self, condition: &str) {
+        let condition = condition.trim();
+        self.live = self.fallthrough && condition != "false";
+        self.fallthrough &= condition != "true";
     }
 }
 
@@ -270,6 +378,7 @@ impl<'a> Iterator for Tokens<'a> {
                         let tag = trim_tera_tag(&body[..end - 2]);
                         let (keyword, args) =
                             tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
+                        self.branch_tag(keyword, args);
                         if keyword == "raw" {
                             self.offset = raw_block_end(self.text, self.offset);
                         } else {
@@ -298,7 +407,7 @@ impl<'a> Iterator for Tokens<'a> {
                         }
                     }
                     self.lexer = Source::new(&self.text[self.offset..]).lex();
-                    if delim == b"}}" && self.capture_depth.is_none() {
+                    if delim == b"}}" && self.capture_depth.is_none() && self.live() {
                         return Some(Lexeme {
                             kind: Atom,
                             raw: &self.text[start..self.offset],
@@ -312,7 +421,8 @@ impl<'a> Iterator for Tokens<'a> {
             if kind == Eof {
                 return None;
             }
-            if self.capture_depth.is_none() && !matches!(kind, Whitespace | Comment) {
+            if self.capture_depth.is_none() && self.live() && !matches!(kind, Whitespace | Comment)
+            {
                 return Some(Lexeme {
                     kind,
                     raw: &self.text[start..end],

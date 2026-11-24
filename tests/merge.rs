@@ -358,7 +358,7 @@ fn include_in_a_conditionally_opened_table_is_not_a_directive() {
     let main = write(
         &dir,
         "config.toml",
-        r#"{% if true %}
+        r#"x = {% if true %}1
 [app]
 {% endif %}
 include = ["not-a-file-to-load.toml"]
@@ -366,9 +366,54 @@ include = ["not-a-file-to-load.toml"]
     );
 
     let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["x"].as_integer(), Some(1));
     assert_eq!(
         merged.config["app"]["include"][0].as_str(),
         Some("not-a-file-to-load.toml")
+    );
+}
+
+#[test]
+fn escaped_tera_quote_and_inactive_table_do_not_hide_root_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% set label = 'it\'s %} still a string' %}
+{% if false %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+ready = {{ vars.ready }}
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
+fn rendered_root_include_with_ambiguous_ownership_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if show_app %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+"#,
+    );
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+
+    let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `include`")
+            && message.contains("owning table depends on Tera control flow")),
+        "{err}"
     );
 }
 

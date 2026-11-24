@@ -115,8 +115,10 @@ Semantics:
 - Declare `include` as a TOML array of strings outside Tera control
   blocks. An invalid declaration returns an error naming the file and
   directive rather than loading only some paths or silently skipping it.
-  Keep it outside tables selected by Tera control flow so its owning table
-  is known before rendering.
+  Statically unreachable `if` arms with literal boolean conditions do not
+  affect table ownership. If a potentially active header makes ownership
+  ambiguous and rendering produces an include directive that was not loaded,
+  loading fails instead of dropping it.
 - Paths are **rendered through Tera** with `system.*` and any
   caller-supplied context in scope, but **not** with `vars` (vars
   haven't accumulated yet at the point includes resolve).

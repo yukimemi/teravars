@@ -23,8 +23,8 @@
 //! inside Tera delimiters
 //! (`{{ … }}`, `{% … %}`, `{# … #}`) — a URL fragment or a `replace(from="#")`
 //! filter argument keeps working. Inside an expression or statement it also
-//! follows Tera's own string literals (`"…"`, `'…'`, `` `…` ``, no escape
-//! sequences), so a closing token that appears *within* one —
+//! follows Tera's own string literals (`"…"`, `'…'`, `` `…` ``), including
+//! backslash escapes, so a closing token within a string —
 //! `{{ x | replace(from="}}") }}` — does not end the tag early.
 //!
 //! Line structure is preserved: only the bytes from the `#` to the end of the
@@ -114,9 +114,7 @@ enum State {
 struct Scanner {
     state: State,
     /// Quote byte of the string literal currently open *inside* a Tera
-    /// expression or statement, if any. Tera's own lexer accepts `"…"`,
-    /// `'…'` and `` `…` `` and has no escape sequences (that is why it has
-    /// three quote styles), so the matching quote byte always closes it.
+    /// expression or statement, if any.
     tera_quote: Option<u8>,
 }
 
@@ -241,6 +239,10 @@ impl Scanner {
 fn scan_tera_body(b: &[u8], mut i: usize, delim: &[u8], quote: &mut Option<u8>) -> Option<usize> {
     while i < b.len() {
         match *quote {
+            Some(_) if b[i] == b'\\' => {
+                i += 2;
+                continue;
+            }
             Some(open) if b[i] == open => *quote = None,
             None if matches!(b[i], b'"' | b'\'' | b'`') => *quote = Some(b[i]),
             None if at(b, i, delim) => return Some(i + delim.len()),
@@ -423,6 +425,13 @@ mod tests {
             "{% endif %}\n",
         );
         assert_eq!(strip_toml_comments(src), src);
+    }
+
+    #[test]
+    fn escaped_tera_quotes_do_not_hide_later_comments() {
+        let head = r#"{% set label = 'it\'s %} # inside' %}"#;
+        let text = format!("{head}\nkey = 1 # outside\n");
+        assert_eq!(strip_toml_comments(&text), format!("{head}\nkey = 1 \n"));
     }
 
     #[test]

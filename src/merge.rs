@@ -81,7 +81,7 @@ fn load_file_recursive(
     let raw = strip_toml_comments(&raw);
 
     let include_paths = extract_include_paths(&raw, path)?;
-    for raw_inc in &include_paths {
+    for raw_inc in &include_paths.paths {
         let rendered = engine
             .render(raw_inc, extra_ctx)
             .map_err(|e| Error::Render(format!("{} include: {}", path.display(), error_msg(&e))))?;
@@ -112,6 +112,7 @@ fn load_file_recursive(
         .parse()
         .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
 
+    include_paths.check_rendered(&parsed, path)?;
     parsed.remove("include");
     parsed.remove("teravars");
 
@@ -209,6 +210,10 @@ fn error_msg(err: &Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
+        include::extract_include_paths(text, path).map(|includes| includes.paths)
+    }
 
     #[test]
     fn deep_merge_recursive_tables() {
