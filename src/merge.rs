@@ -106,7 +106,7 @@ fn load_file_recursive(
 
     let rendered = engine
         .render(&raw, &ctx)
-        .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_msg(&e))))?;
+        .map_err(|e| include_paths.render_error(path, error_msg(&e)))?;
 
     let mut parsed: Table = rendered
         .parse()

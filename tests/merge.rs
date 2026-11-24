@@ -394,6 +394,46 @@ ready = {{ vars.ready }}
 }
 
 #[test]
+fn dead_branch_with_unterminated_toml_string_does_not_hide_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if false %}
+x = '''
+{# {% endif %} #}
+{% if true %}ignored{% endif %}
+{% endif %}
+include = ["machine.toml"]
+ready = {{ vars.ready }}
+"#,
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
+fn raw_table_header_keeps_include_table_local() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"x = {% raw %}1
+[app]
+{% endraw %}
+include = ["missing.toml"]
+"#,
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["x"].as_integer(), Some(1));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("missing.toml")
+    );
+}
+
+#[test]
 fn rendered_root_include_with_ambiguous_ownership_is_an_error() {
     let dir = TempDir::new().unwrap();
     let main = write(
@@ -413,6 +453,33 @@ include = ["machine.toml"]
         matches!(&err, Error::Extract(message)
             if message.contains("config.toml `include`")
             && message.contains("owning table depends on Tera control flow")),
+        "{err}"
+    );
+}
+
+#[test]
+fn render_error_keeps_the_ambiguous_include_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if show_app %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+ready = "{{ vars.ready }}"
+"#,
+    );
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+
+    let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `include`")
+                && message.contains("owning table depends on Tera control flow")
+                && message.contains("ready")),
         "{err}"
     );
 }

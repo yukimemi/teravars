@@ -19,12 +19,12 @@ const NAMESPACED: &str = "teravars.include";
 pub(super) struct Includes {
     pub(super) paths: Vec<String>,
     name: Option<&'static str>,
-    ambiguous: bool,
+    ambiguous: Option<&'static str>,
 }
 
 impl Includes {
     pub(super) fn check_rendered(&self, parsed: &toml::Table, path: &Path) -> Result<()> {
-        if !self.ambiguous {
+        if self.ambiguous.is_none() {
             return Ok(());
         }
         let namespaced = parsed
@@ -42,6 +42,19 @@ impl Includes {
         }
         Ok(())
     }
+
+    pub(super) fn render_error(&self, path: &Path, cause: String) -> Error {
+        match self.ambiguous {
+            Some(name) => invalid(
+                path,
+                name,
+                format_args!(
+                    "owning table depends on Tera control flow; rendering failed: {cause}"
+                ),
+            ),
+            None => Error::Render(format!("{}: {cause}", path.display())),
+        }
+    }
 }
 
 // Locate static assignments in the source without requiring unrelated
@@ -53,7 +66,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let mut section = Section::Root;
     let mut root = None;
     let mut namespaced = None;
-    let mut ambiguous = false;
+    let mut ambiguous = None;
 
     while let Some(first) = tokens.next() {
         let owner = match first.kind {
@@ -82,7 +95,9 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 Section::Root => Some((&mut root, ROOT)),
                 Section::Teravars => Some((&mut namespaced, NAMESPACED)),
                 Section::Ambiguous => {
-                    ambiguous |= take(&mut tokens, Equals).is_some();
+                    if take(&mut tokens, Equals).is_some() {
+                        ambiguous = Some(ROOT);
+                    }
                     None
                 }
                 Section::Other => None,
@@ -98,7 +113,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                     {
                         if let Some(value) = inline_include(text, &mut tokens, path)? {
                             if matches!(section, Section::Ambiguous) {
-                                ambiguous = true;
+                                ambiguous = Some(NAMESPACED);
                             } else {
                                 record(&mut namespaced, value, path, NAMESPACED)?;
                             }
@@ -116,7 +131,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
             let start = eq.end;
             let end = value_end(&mut tokens, &eq, false);
             if matches!(section, Section::Ambiguous) {
-                ambiguous = true;
+                ambiguous = Some(name);
             } else {
                 record(slot, &text[start..end], path, name)?;
             }
@@ -294,6 +309,7 @@ struct Tokens<'a> {
     block_depth: usize,
     capture_depth: Option<usize>,
     branches: Vec<Branch>,
+    raw_resume: Option<usize>,
 }
 
 impl<'a> Tokens<'a> {
@@ -305,6 +321,7 @@ impl<'a> Tokens<'a> {
             block_depth: 0,
             capture_depth: None,
             branches: Vec::new(),
+            raw_resume: None,
         }
     }
 
@@ -356,11 +373,24 @@ impl<'a> Iterator for Tokens<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         use TokenKind::*;
 
-        while let Some(token) = self.lexer.next() {
-            let start = self.offset + token.span().start();
-            let end = self.offset + token.span().end();
-            let kind = token.kind();
-            if kind == LeftCurlyBracket {
+        loop {
+            let (start, end, kind) = if self.live() {
+                let token = self.lexer.next()?;
+                (
+                    self.offset + token.span().start(),
+                    self.offset + token.span().end(),
+                    token.kind(),
+                )
+            } else {
+                // Dead text need not be valid TOML. Find Tera tags without
+                // letting a TOML string consume the matching branch tag.
+                let start = self.offset
+                    + self.text.as_bytes()[self.offset..]
+                        .windows(2)
+                        .position(|pair| matches!(pair, b"{%" | b"{{" | b"{#"))?;
+                (start, start + 1, LeftCurlyBracket)
+            };
+            if kind == LeftCurlyBracket && self.raw_resume.is_none() {
                 let rest = &self.text[start..];
                 let delim: &[u8] = match rest.as_bytes().get(1) {
                     Some(b'{') => b"}}",
@@ -380,7 +410,14 @@ impl<'a> Iterator for Tokens<'a> {
                             tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
                         self.branch_tag(keyword, args);
                         if keyword == "raw" {
-                            self.offset = raw_block_end(self.text, self.offset);
+                            let (body_end, resume) = raw_block_end(self.text, self.offset);
+                            if self.live() && self.capture_depth.is_none() {
+                                self.lexer = Source::new(&self.text[self.offset..body_end]).lex();
+                                self.raw_resume = Some(resume);
+                                self.block_depth += 1;
+                                continue;
+                            }
+                            self.offset = resume;
                         } else {
                             match block_delta(keyword, args) {
                                 1 => {
@@ -419,6 +456,12 @@ impl<'a> Iterator for Tokens<'a> {
                 }
             }
             if kind == Eof {
+                if let Some(resume) = self.raw_resume.take() {
+                    self.offset = resume;
+                    self.lexer = Source::new(&self.text[resume..]).lex();
+                    self.block_depth -= 1;
+                    continue;
+                }
                 return None;
             }
             if self.capture_depth.is_none() && self.live() && !matches!(kind, Whitespace | Comment)
@@ -431,7 +474,6 @@ impl<'a> Iterator for Tokens<'a> {
                 });
             }
         }
-        None
     }
 }
 
@@ -450,16 +492,17 @@ fn block_delta(keyword: &str, args: &str) -> i8 {
     }
 }
 
-fn raw_block_end(text: &str, mut offset: usize) -> usize {
+fn raw_block_end(text: &str, mut offset: usize) -> (usize, usize) {
     while let Some(open) = text[offset..].find("{%") {
-        offset += open + 2;
+        let start = offset + open;
+        offset = start + 2;
         let tag = text[offset..].trim_start_matches(|c: char| c.is_whitespace() || c == '-');
         if let Some(close) = tag.strip_prefix("endraw") {
             let close = close.trim_start_matches(|c: char| c.is_whitespace() || c == '-');
             if close.starts_with("%}") {
-                return text.len() - close.len() + 2;
+                return (start, text.len() - close.len() + 2);
             }
         }
     }
-    text.len()
+    (text.len(), text.len())
 }

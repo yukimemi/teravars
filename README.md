@@ -119,6 +119,8 @@ Semantics:
   affect table ownership. If a potentially active header makes ownership
   ambiguous and rendering produces an include directive that was not loaded,
   loading fails instead of dropping it.
+  If rendering fails before ownership can be checked, the error names the
+  ambiguous directive and retains the render failure.
 - Paths are **rendered through Tera** with `system.*` and any
   caller-supplied context in scope, but **not** with `vars` (vars
   haven't accumulated yet at the point includes resolve).
