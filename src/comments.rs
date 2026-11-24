@@ -23,8 +23,8 @@
 //! inside Tera delimiters
 //! (`{{ … }}`, `{% … %}`, `{# … #}`) — a URL fragment or a `replace(from="#")`
 //! filter argument keeps working. Inside an expression or statement it also
-//! follows Tera's own string literals (`"…"`, `'…'`, `` `…` ``, no escape
-//! sequences), so a closing token that appears *within* one —
+//! follows Tera's own string literals (`"…"`, `'…'`, `` `…` ``), including
+//! backslash escapes, so a closing token within a string —
 //! `{{ x | replace(from="}}") }}` — does not end the tag early.
 //!
 //! Line structure is preserved: only the bytes from the `#` to the end of the
@@ -114,9 +114,7 @@ enum State {
 struct Scanner {
     state: State,
     /// Quote byte of the string literal currently open *inside* a Tera
-    /// expression or statement, if any. Tera's own lexer accepts `"…"`,
-    /// `'…'` and `` `…` `` and has no escape sequences (that is why it has
-    /// three quote styles), so the matching quote byte always closes it.
+    /// expression or statement, if any.
     tera_quote: Option<u8>,
 }
 
@@ -181,18 +179,11 @@ impl Scanner {
                     } else {
                         b"%}"
                     };
-                    match self.tera_quote {
-                        Some(quote) => {
-                            if b[i] == quote {
-                                self.tera_quote = None;
-                            }
-                            i += 1;
-                        }
-                        None if matches!(b[i], b'"' | b'\'' | b'`') => {
-                            self.tera_quote = Some(b[i]);
-                            i += 1;
-                        }
-                        None => i += self.close(b, i, delim),
+                    if let Some(end) = scan_tera_body(b, i, delim, &mut self.tera_quote) {
+                        self.state = State::Normal;
+                        i = end;
+                    } else {
+                        break;
                     }
                 }
                 // A Tera comment's body is arbitrary text — no string
@@ -243,6 +234,35 @@ impl Scanner {
         }
         run
     }
+}
+
+fn scan_tera_body(b: &[u8], mut i: usize, delim: &[u8], quote: &mut Option<u8>) -> Option<usize> {
+    while i < b.len() {
+        match *quote {
+            Some(_) if b[i] == b'\\' => {
+                i += 2;
+                continue;
+            }
+            Some(open) if b[i] == open => *quote = None,
+            None if matches!(b[i], b'"' | b'\'' | b'`') => *quote = Some(b[i]),
+            None if at(b, i, delim) => return Some(i + delim.len()),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+pub(crate) fn tera_tag_end(body: &str, delim: &[u8]) -> Option<usize> {
+    if delim == b"#}" {
+        body.find("#}").map(|i| i + 2)
+    } else {
+        scan_tera_body(body.as_bytes(), 0, delim, &mut None)
+    }
+}
+
+pub(crate) fn trim_tera_tag(body: &str) -> &str {
+    body.trim_matches(|c: char| c.is_whitespace() || c == '-')
 }
 
 /// Recognize a delimiter that opens a non-`Normal` state at `i`.
@@ -405,6 +425,13 @@ mod tests {
             "{% endif %}\n",
         );
         assert_eq!(strip_toml_comments(src), src);
+    }
+
+    #[test]
+    fn escaped_tera_quotes_do_not_hide_later_comments() {
+        let head = r#"{% set label = 'it\'s %} # inside' %}"#;
+        let text = format!("{head}\nkey = 1 # outside\n");
+        assert_eq!(strip_toml_comments(&text), format!("{head}\nkey = 1 \n"));
     }
 
     #[test]

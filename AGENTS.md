@@ -38,10 +38,12 @@ src/
   vars.rs       — extract_vars (text-based, Tera-block-depth aware),
                    resolve / resolve_with_max_iter (iterative fixed-point),
                    expand_value (in-place tree walker),
-                   scan_tera_tags (pub(crate); reused by merge.rs)
+                   Tera statement block-depth classification
   system.rs     — SystemInfo {os, arch, user, host, cwd} + system_context()
   merge.rs      — load_merged + discover_config_files + deep_merge +
-                   include-directive resolution with cycle detection
+                   include loading with cycle detection
+  merge/include.rs — token-based discovery of static include directives
+                     before Tera rendering
   helpers/
     mod.rs      — register_default; gates by feature
     env.rs      — env(name, default?)                     (cfg=std-helpers)
@@ -63,8 +65,10 @@ user before reverting any of them.
   We track `{% if %}` / `{% for %}` / `{% block %}` depth so vars
   inside conditional blocks aren't picked up. When a `[vars]`
   section header appears, we copy lines until the next non-vars
-  section header. The tag scanner (`scan_tera_tags`) is shared
-  with `merge.rs`'s skeleton-stripper.
+  section header. The vars scanner and `merge/include.rs` share
+  quote-aware Tera tag closing and whitespace-control handling
+  (`comments::tera_tag_end` and `comments::trim_tera_tag`), and use
+  `vars::tera_block_delta` to classify common Tera block statements.
 - **`resolve` returns `Err` on non-convergence but leaves the
   `&mut Table` in its last partial state.** Default budget is 10
   iterations. Callers that prefer rvpm-style resilience over

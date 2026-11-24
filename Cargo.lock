@@ -377,6 +377,7 @@ dependencies = [
  "tera",
  "thiserror",
  "toml",
+ "toml_parser",
  "tracing",
  "whoami",
 ]

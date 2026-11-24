@@ -3,7 +3,7 @@ use toml::{Table, Value};
 
 use crate::Engine;
 use crate::Result;
-use crate::comments::strip_toml_comments;
+use crate::comments::{strip_toml_comments, tera_tag_end, trim_tera_tag};
 use crate::error::Error;
 
 pub const DEFAULT_MAX_RESOLVE_ITERATIONS: usize = 10;
@@ -97,17 +97,15 @@ pub(crate) struct TagScan {
     pub unterminated: bool,
 }
 
-pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
-    const OPENERS: &[&str] = &["if", "for", "block", "macro", "filter", "raw"];
-    const CLOSERS: &[&str] = &[
-        "endif",
-        "endfor",
-        "endblock",
-        "endmacro",
-        "endfilter",
-        "endraw",
-    ];
+pub(crate) fn tera_block_delta(keyword: &str) -> i8 {
+    match keyword {
+        "if" | "for" | "block" | "macro" | "filter" | "raw" => 1,
+        "endif" | "endfor" | "endblock" | "endmacro" | "endfilter" | "endraw" => -1,
+        _ => 0,
+    }
+}
 
+pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
     let mut opens = 0;
     let mut closes = 0;
     let mut unterminated = false;
@@ -115,16 +113,16 @@ pub(crate) fn scan_tera_tags(line: &str) -> TagScan {
 
     while let Some(idx) = s.find("{%") {
         let after = &s[idx + 2..];
-        match after.find("%}") {
+        match tera_tag_end(after, b"%}") {
             Some(end) => {
-                let body = after[..end].trim();
+                let body = trim_tera_tag(&after[..end - 2]);
                 let first = body.split_whitespace().next().unwrap_or("");
-                if OPENERS.contains(&first) {
-                    opens += 1;
-                } else if CLOSERS.contains(&first) {
-                    closes += 1;
+                match tera_block_delta(first) {
+                    1 => opens += 1,
+                    -1 => closes += 1,
+                    _ => {}
                 }
-                s = &after[end + 2..];
+                s = &after[end..];
             }
             None => {
                 unterminated = true;
@@ -490,5 +488,21 @@ ports = ["{{ port }}", 8080]
         assert!(vars.get("dropped").is_none());
         assert!(vars.get("stray").is_none());
         assert_eq!(vars.len(), 2);
+    }
+
+    #[test]
+    fn extract_vars_handles_whitespace_control_and_quoted_tag_close() {
+        let text = r#"
+[vars]
+before = "yes"
+{%- if x == "%} {% if true" -%}
+conditional = "no"
+{%- endif -%}
+after = "yes"
+"#;
+        let vars = extract_vars(text).unwrap();
+        assert_eq!(vars["before"].as_str(), Some("yes"));
+        assert!(!vars.contains_key("conditional"));
+        assert_eq!(vars["after"].as_str(), Some("yes"));
     }
 }

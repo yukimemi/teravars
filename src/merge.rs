@@ -2,6 +2,8 @@
 //! Tera rendering and an `include = [...]` directive that lets a config file
 //! pull in other files before it is processed.
 
+mod include;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +14,8 @@ use crate::Result;
 use crate::comments::strip_toml_comments;
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::vars::{extract_vars, resolve_in_context, scan_tera_tags};
+use crate::vars::{extract_vars, resolve_in_context};
+use include::extract_include_paths;
 
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
@@ -78,7 +81,7 @@ fn load_file_recursive(
     let raw = strip_toml_comments(&raw);
 
     let include_paths = extract_include_paths(&raw, path)?;
-    for raw_inc in &include_paths {
+    for raw_inc in &include_paths.paths {
         let rendered = engine
             .render(raw_inc, extra_ctx)
             .map_err(|e| Error::Render(format!("{} include: {}", path.display(), error_msg(&e))))?;
@@ -103,12 +106,13 @@ fn load_file_recursive(
 
     let rendered = engine
         .render(&raw, &ctx)
-        .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_msg(&e))))?;
+        .map_err(|e| include_paths.render_error(path, error_msg(&e)))?;
 
     let mut parsed: Table = rendered
         .parse()
         .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
 
+    include_paths.check_rendered(&parsed, path)?;
     parsed.remove("include");
     parsed.remove("teravars");
 
@@ -196,100 +200,6 @@ fn resolve_relative(base_file: &Path, target: &Path) -> PathBuf {
     }
 }
 
-/// Extract the include directive paths from a raw TOML+Tera file.
-///
-/// Looks at the file's TOML skeleton (Tera control blocks `{% ... %}` removed
-/// to make it parse-friendly) and reads either:
-/// - root-level `include = [...]`, or
-/// - `[teravars] include = [...]` (namespaced fallback)
-///
-/// If both forms are present, returns `Error::IncludeConflict`.
-fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
-    let skeleton = strip_tera_blocks(text);
-    if skeleton.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let parsed: Table = match skeleton.parse() {
-        Ok(t) => t,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let root_inc = read_string_array(parsed.get("include"));
-    let teravars_inc = parsed
-        .get("teravars")
-        .and_then(|v| v.as_table())
-        .and_then(|t| read_string_array(t.get("include")).into());
-
-    match (
-        root_inc.is_empty(),
-        teravars_inc.as_ref().is_none_or(|v| v.is_empty()),
-    ) {
-        (false, false) => Err(Error::IncludeConflict {
-            path: path.to_path_buf(),
-        }),
-        (false, _) => Ok(root_inc),
-        (_, false) => Ok(teravars_inc.unwrap()),
-        _ => Ok(Vec::new()),
-    }
-}
-
-fn read_string_array(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn strip_tera_blocks(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut block_depth: usize = 0;
-    let mut multiline_open = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if multiline_open {
-            if trimmed.contains("%}") {
-                multiline_open = false;
-            }
-            out.push('\n');
-            continue;
-        }
-
-        // Only treat a line as a Tera control line when its trimmed form
-        // starts with `{%`. A TOML `key = "...{% if %}..."` is a value, not
-        // a control directive, and must be left in the skeleton so the
-        // include detector can still see (or correctly ignore) the key.
-        if trimmed.starts_with("{%") {
-            let scan = scan_tera_tags(trimmed);
-            if scan.unterminated {
-                multiline_open = true;
-                out.push('\n');
-                continue;
-            }
-            block_depth = block_depth
-                .saturating_add(scan.opens)
-                .saturating_sub(scan.closes);
-            out.push('\n');
-            continue;
-        }
-
-        if block_depth > 0 {
-            out.push('\n');
-            continue;
-        }
-
-        out.push_str(line);
-        out.push('\n');
-    }
-
-    out
-}
-
 fn error_msg(err: &Error) -> String {
     match err {
         Error::Render(s) => s.clone(),
@@ -300,6 +210,10 @@ fn error_msg(err: &Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
+        include::extract_include_paths(text, path).map(|includes| includes.paths)
+    }
 
     #[test]
     fn deep_merge_recursive_tables() {
@@ -387,7 +301,7 @@ foo = "bar"
     #[test]
     fn extract_include_paths_conflict() {
         let text = r#"
-include = ["a.toml"]
+include = []
 
 [teravars]
 include = ["b.toml"]
@@ -399,15 +313,28 @@ include = ["b.toml"]
     #[test]
     fn extract_include_paths_skips_tera_control_blocks() {
         let text = r#"
-{% if true %}
+{%- if ("%}" ==
+       "%}") -%}
 include = ["should-not-appear.toml"]
-{% endif %}
+{%- if true %}
+include = ["nested.toml"]
+{% endif -%}
+{%- endif %}
+{% if true %} include = ["same-line.toml"] {% endif %}
+{% set captured | replace(from="a", to="b") %}
+[captured]
+include = ["captured.toml"]
+{% endset %}
+{% raw %}
+{% if true %}
+include = ["literal-template.toml"]
+{% endraw %}
 
-[vars]
-foo = "bar"
+values = {% if true %}[1]{% endif %}
+include = ["actual.toml"]
 "#;
         let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
-        assert!(paths.is_empty());
+        assert_eq!(paths, ["actual.toml"]);
     }
 
     #[test]
@@ -417,5 +344,106 @@ foo = "bar"
 "#;
         let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn extract_include_paths_ignores_non_directives() {
+        let text = r###"
+# include = ["comment.toml"]
+{#
+include = ["tera-comment.toml"]
+#}
+example = '''
+include = ["literal-string.toml"]
+''''
+example_basic = """
+[teravars]
+include = ["basic-string.toml"]
+""""
+example_expr = {{ `}}
+include = ["tera-expression.toml"]
+` }}
+entries = [{
+    include = ["inline-member.toml"]
+}]
+"teravars.include" = ["quoted-single-key.toml"]
+teravars = { nested = { include = ["nested-member.toml"] } }
+
+[app]
+include = ["table-local.toml"]
+teravars.include = ["table-local-namespace.toml"]
+
+[[teravars]]
+include = ["array-table.toml"]
+"###;
+        let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn extract_include_paths_ignores_keys_under_nested_or_dynamic_headers() {
+        for header in ["[teravars.sub]", "[{{ vars.dynamic_table }}]"] {
+            let text = format!("{header}\ninclude = [\"table-local.toml\"]");
+            let paths = extract_include_paths(&text, Path::new("dummy")).unwrap();
+            assert!(
+                paths.is_empty(),
+                "unexpected includes under {header}: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_include_paths_supports_quoted_dotted_and_inline_forms() {
+        for text in [
+            r#""includ\u0065" = ["a.toml", 'b.toml']"#,
+            r#""teravars" . 'include' = ["a.toml", 'b.toml']"#,
+            r#"teravars = { other = {{ unrelated }}, "include" = ["a.toml", 'b.toml'] }"#,
+            "teravars = {\ninclude = [\"a.toml\", 'b.toml'] # note\n}\n",
+            "[\"teravars\"]\r\n'include' = [\r\n\"a.toml\", # note\r\n'b.toml',\r\n]\r\n",
+        ] {
+            let paths = extract_include_paths(text, Path::new("dummy")).unwrap();
+            assert_eq!(paths, ["a.toml", "b.toml"], "source: {text}");
+        }
+    }
+
+    #[test]
+    fn extract_include_paths_rejects_invalid_directives() {
+        for (text, directive) in [
+            ("include = ", "include"),
+            ("include = [\"a.toml\"", "include"),
+            ("include = \"a.toml\"", "include"),
+            ("[teravars]\ninclude = [\"a.toml\", 1]", "teravars.include"),
+            ("teravars.include = {{ paths }}", "teravars.include"),
+            ("teravars = { include = [false] }", "teravars.include"),
+        ] {
+            let error = extract_include_paths(text, Path::new("broken.toml")).unwrap_err();
+            let Error::Extract(message) = error else {
+                panic!("unexpected error: {error}");
+            };
+            assert!(
+                message.starts_with(&format!("broken.toml `{directive}`: ")),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_include_paths_rejects_duplicate_declarations() {
+        for (text, directive) in [
+            ("include = []\n'include' = [\"b.toml\"]", "include"),
+            (
+                "teravars.include = []\n[teravars]\ninclude = [\"b.toml\"]",
+                "teravars.include",
+            ),
+        ] {
+            let error = extract_include_paths(text, Path::new("duplicate.toml")).unwrap_err();
+            let Error::Extract(message) = error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(
+                message,
+                format!("duplicate.toml `{directive}`: duplicate declaration")
+            );
+        }
     }
 }

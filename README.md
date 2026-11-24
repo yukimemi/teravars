@@ -108,9 +108,19 @@ api_url = "https://api.{{ vars.global_host }}"   # global_host comes from common
 
 Semantics:
 
-- Includes are loaded **before** the file that declares them, so the
-  declaring file overrides anything it includes (the natural reading
-  of "build on top of these").
+- Static includes are discovered and loaded **before** rendering the
+  declaring file, even if a bare Tera expression elsewhere makes the
+  source invalid TOML before rendering. Included vars are available to
+  that render, and the declaring file overrides what it includes.
+- Declare `include` as a TOML array of strings outside Tera control
+  blocks. An invalid declaration returns an error naming the file and
+  directive rather than loading only some paths or silently skipping it.
+  Statically unreachable `if` arms with literal boolean conditions do not
+  affect table ownership. If a potentially active header makes ownership
+  ambiguous and rendering produces an include directive that was not loaded,
+  loading fails instead of dropping it.
+  If rendering fails before ownership can be checked, the error names the
+  ambiguous directive and retains the render failure.
 - Paths are **rendered through Tera** with `system.*` and any
   caller-supplied context in scope, but **not** with `vars` (vars
   haven't accumulated yet at the point includes resolve).
@@ -122,12 +132,13 @@ Semantics:
   root `include` and the entire `[teravars]` namespace are stripped
   before merging.
 - If both root `include = [...]` and `[teravars] include = [...]`
-  are present in the same file, that's `Error::IncludeConflict`.
+  are present in the same file, including empty arrays, that's
+  `Error::IncludeConflict`.
   Pick one form per file.
 
-The `[teravars]` namespace exists as a fallback for the rare case
-where your application config legitimately uses `include` as a
-top-level key for something else.
+Use `[teravars] include = [...]` to keep the directive in the reserved
+`teravars` namespace. An `include` key in any other table is ordinary
+application config.
 
 ## Cargo features
 

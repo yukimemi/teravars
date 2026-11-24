@@ -260,6 +260,271 @@ api_url = "https://api.{{ vars.domain }}"
 }
 
 #[test]
+fn include_supplies_vars_for_bare_tera_expression() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        "[vars]\ngui = \"desktop\"\nwrapper_guis = [\"desktop\"]\n",
+    );
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"include = ["machine.toml"]
+
+[todoke.gui]
+gui = {{ vars.gui in vars.wrapper_guis }}
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["todoke"]["gui"]["gui"].as_bool(), Some(true));
+}
+
+#[test]
+fn namespaced_include_after_bare_expression_supplies_vars_before_root_overrides() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        r#"[vars]
+gui = "terminal"
+wrapper_guis = ["desktop"]
+
+[todoke.gui]
+source = "machine"
+"#,
+    );
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"[todoke.gui]
+gui = {{ vars.gui in vars.wrapper_guis }}
+source = "root"
+
+[teravars]
+include = ["machine.toml"]
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    let gui = &merged.config["todoke"]["gui"];
+    assert_eq!(gui["gui"].as_bool(), Some(false));
+    assert_eq!(gui["source"].as_str(), Some("root"));
+}
+
+#[test]
+fn include_like_text_is_not_loaded_and_table_local_include_is_preserved() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r###"# include = ["missing-comment.toml"]
+{# include = ["missing-tera-comment.toml"] #}
+include = ["machine.toml"]
+
+doc = """
+include = ["missing-basic.toml"]
+[teravars]
+include = ["missing-namespace.toml"]
+"""
+literal = '''
+include = ["missing-literal.toml"]
+'''
+nested = { include = ["missing-inline.toml"] }
+
+{% if false %}
+include = ["missing-conditional.toml"]
+{% endif %}
+
+[app]
+include = ["missing-table-local.toml"]
+ready = {{ vars.ready }}
+"###,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["app"]["ready"].as_bool(), Some(true));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("missing-table-local.toml")
+    );
+}
+
+#[test]
+fn include_in_a_conditionally_opened_table_is_not_a_directive() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"x = {% if true %}1
+[app]
+{% endif %}
+include = ["not-a-file-to-load.toml"]
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["x"].as_integer(), Some(1));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("not-a-file-to-load.toml")
+    );
+}
+
+#[test]
+fn escaped_tera_quote_and_inactive_table_do_not_hide_root_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% set label = 'it\'s %} still a string' %}
+{% if false %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+ready = {{ vars.ready }}
+"#,
+    );
+
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
+fn dead_branch_with_unterminated_toml_string_does_not_hide_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if false %}
+x = '''
+{# {% endif %} #}
+{% if true %}ignored{% endif %}
+{% endif %}
+include = ["machine.toml"]
+ready = {{ vars.ready }}
+"#,
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
+fn raw_table_header_keeps_include_table_local() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"x = {% raw %}1
+[app]
+{% endraw %}
+include = ["missing.toml"]
+"#,
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["x"].as_integer(), Some(1));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("missing.toml")
+    );
+}
+
+#[test]
+fn rendered_root_include_with_ambiguous_ownership_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if show_app %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+"#,
+    );
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+
+    let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `include`")
+            && message.contains("owning table depends on Tera control flow")),
+        "{err}"
+    );
+}
+
+#[test]
+fn render_error_keeps_the_ambiguous_include_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        r#"{% if show_app %}
+[app]
+{% endif %}
+include = ["machine.toml"]
+ready = "{{ vars.ready }}"
+"#,
+    );
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+
+    let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `include`")
+                && message.contains("owning table depends on Tera control flow")
+                && message.contains("ready")),
+        "{err}"
+    );
+}
+
+#[test]
+fn malformed_include_reports_the_owning_file_before_loading_paths() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "machine.toml",
+        "[teravars]\ninclude = ['missing.toml', 42]\n",
+    );
+    let main = write(&dir, "config.toml", "include = ['machine.toml']\n");
+
+    let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+    let Error::Extract(message) = err else {
+        panic!("expected an include diagnostic, got: {err}");
+    };
+    assert!(
+        message.contains("machine.toml `teravars.include`"),
+        "{message}"
+    );
+    assert!(message.contains("expected a string"), "{message}");
+}
+
+#[test]
+fn root_include_requires_an_array_not_a_string_or_bare_expression() {
+    let dir = TempDir::new().unwrap();
+    for (name, text) in [
+        ("scalar.toml", r#"include = "machine.toml""#),
+        ("expression.toml", "include = {{ vars.paths }}"),
+    ] {
+        let main = write(&dir, name, text);
+        let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+        let Error::Extract(message) = err else {
+            panic!("expected an include diagnostic, got: {err}");
+        };
+        assert!(
+            message.contains(&format!("{name} `include`: ")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
 fn include_strips_directive_from_merged_config() {
     let dir = TempDir::new().unwrap();
     write(&dir, "base.toml", "[vars]\na = \"1\"\n");
