@@ -65,7 +65,6 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let mut root = None;
     let mut namespaced = None;
     let mut ambiguous = None;
-    let mut rendered_statement = false;
 
     while let Some(first) = tokens.next() {
         let owner = match first.kind {
@@ -75,7 +74,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 // A guaranteed static header restores definite ownership.
                 let mut end = first.end;
                 let mut closing_end = None;
-                section = if !first.definite || (first.block_depth != 0 && rendered_statement) {
+                section = if !first.definite {
                     Section::Ambiguous
                 } else if tokens
                     .next_if(|t| t.block_depth == first.block_depth && t.is_key("teravars"))
@@ -110,9 +109,6 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 continue;
             }
             Atom if first.raw.starts_with("{{") => {
-                // Standalone output can open a multiline TOML string.
-                // A later conditional header cannot rule this out.
-                rendered_statement = true;
                 section = Section::Ambiguous;
                 None
             }
@@ -337,6 +333,7 @@ struct Tokens<'a> {
     capture_depth: Option<usize>,
     branches: Vec<Branch>,
     raw_resume: Option<usize>,
+    output_seen: bool,
 }
 
 impl<'a> Tokens<'a> {
@@ -349,6 +346,7 @@ impl<'a> Tokens<'a> {
             capture_depth: None,
             branches: Vec::new(),
             raw_resume: None,
+            output_seen: false,
         }
     }
 
@@ -360,10 +358,11 @@ impl<'a> Tokens<'a> {
         if self.block_depth == 0 {
             return true;
         }
-        // A guaranteed branch can still concatenate its header with earlier
-        // rendered text. Require a newline after the preceding tag that
-        // cannot be removed by that tag's right whitespace control.
-        self.block_depth == self.branches.len()
+        // Earlier output may have opened a multiline TOML string. A
+        // guaranteed branch can also concatenate its header with earlier
+        // rendered text unless an untrimmed newline separates them.
+        !self.output_seen
+            && self.block_depth == self.branches.len()
             && self.branches.iter().all(|b| b.certain)
             && self.text[self.offset..start].contains('\n')
             && self.text.as_bytes().get(self.offset.saturating_sub(3)) != Some(&b'-')
@@ -491,6 +490,7 @@ impl<'a> Iterator for Tokens<'a> {
                     }
                     self.lexer = Source::new(&self.text[self.offset..]).lex();
                     if delim == b"}}" && self.capture_depth.is_none() && self.live() {
+                        self.output_seen = true;
                         return Some(Lexeme {
                             kind: Atom,
                             raw: &self.text[start..self.offset],

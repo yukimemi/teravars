@@ -471,12 +471,40 @@ fn definite_conditional_namespace_header_loads_include() {
         let main = write(
             &dir,
             "config.toml",
-            &format!("ready = {{{{ vars.ready }}}}\n{header}\ninclude = ['machine.toml']\n"),
+            &format!("{header}\ninclude = ['machine.toml']\n[app]\nready = {{{{ vars.ready }}}}\n"),
         );
         let merged = load_merged([&main], &mut Engine::new(), &ctx)
             .unwrap_or_else(|err| panic!("{header}: {err}"));
-        assert_eq!(merged.config["ready"].as_bool(), Some(true));
+        assert_eq!(merged.config["app"]["ready"].as_bool(), Some(true));
     }
+}
+
+#[test]
+fn conditional_namespace_after_value_expression_requires_static_owner() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        "ready = {{ vars.ready }}\n{% if true %}\n[teravars]\n{% endif %}\n\
+         include = ['machine.toml']\n",
+    );
+    let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("`include`")
+                && message.contains("owning table depends on Tera rendering")
+                && message.contains("vars.ready")),
+        "{err}"
+    );
+
+    let main = write(
+        &dir,
+        "config.toml",
+        "ready = {{ vars.ready }}\n[teravars]\ninclude = ['machine.toml']\n",
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
 }
 
 #[test]
@@ -505,24 +533,32 @@ fn whitespace_trimmed_conditional_header_keeps_include_table_local() {
 fn conditional_header_after_rendered_multiline_string_opening_is_ambiguous() {
     let dir = TempDir::new().unwrap();
     let mut ctx = Context::new();
-    ctx.insert("opening", &"note = \"\"\"");
     ctx.insert("closing", &"\"\"\"");
-    for intermediate in ["", "[other]\n"] {
-        let main = write(
-            &dir,
-            "config.toml",
-            &format!(
-                "[app]\n{{{{ opening }}}}\n{intermediate}\
-                 {{% if true %}}\n[teravars]\n{{% endif %}}\n\
-                 include = ['missing.toml']\n{{{{ closing }}}}\n"
-            ),
-        );
-        let merged = load_merged([&main], &mut Engine::new(), &ctx).unwrap();
-        assert_eq!(
-            merged.config["app"]["note"].as_str(),
-            Some(format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str())
-        );
-        assert!(!merged.config.contains_key("other"));
+    for (statement, opening) in [
+        ("{{ opening }}", "note = \"\"\""),
+        ("note = {{ opening }}", "\"\"\""),
+    ] {
+        ctx.insert("opening", &opening);
+        for intermediate in ["", "[other]\n"] {
+            let main = write(
+                &dir,
+                "config.toml",
+                &format!(
+                    "[app]\n{statement}\n{intermediate}\
+                     {{% if true %}}\n[teravars]\n{{% endif %}}\n\
+                     include = ['missing.toml']\n{{{{ closing }}}}\n"
+                ),
+            );
+            let merged = load_merged([&main], &mut Engine::new(), &ctx)
+                .unwrap_or_else(|err| panic!("{statement}: {err}"));
+            assert_eq!(
+                merged.config["app"]["note"].as_str(),
+                Some(
+                    format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str()
+                )
+            );
+            assert!(!merged.config.contains_key("other"));
+        }
     }
 }
 
