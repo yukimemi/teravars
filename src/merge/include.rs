@@ -65,19 +65,24 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let mut root = None;
     let mut namespaced = None;
     let mut ambiguous = None;
+    let mut rendered_statement = false;
 
     while let Some(first) = tokens.next() {
         let owner = match first.kind {
             Newline => continue,
             LeftSquareBracket => {
-                // A conditional header may change the active table. Only
-                // another static header can make the scope definite again.
+                // A potentially active header may change the active table.
+                // A guaranteed static header restores definite ownership.
                 let mut end = first.end;
                 let mut closing_end = None;
-                section = if first.block_depth != 0 {
+                section = if !first.definite || (first.block_depth != 0 && rendered_statement) {
                     Section::Ambiguous
-                } else if take_key(&mut tokens, "teravars")
-                    && let Some(close) = take(&mut tokens, RightSquareBracket)
+                } else if tokens
+                    .next_if(|t| t.block_depth == first.block_depth && t.is_key("teravars"))
+                    .is_some()
+                    && let Some(close) = tokens.next_if(|t| {
+                        t.block_depth == first.block_depth && t.kind == RightSquareBracket
+                    })
                 {
                     closing_end = Some(close.end);
                     if tokens.peek().is_none_or(|t| t.kind == Newline) {
@@ -105,6 +110,9 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 continue;
             }
             Atom if first.raw.starts_with("{{") => {
+                // Standalone output can open a multiline TOML string.
+                // A later conditional header cannot rule this out.
+                rendered_statement = true;
                 section = Section::Ambiguous;
                 None
             }
@@ -298,6 +306,7 @@ struct Lexeme<'a> {
     raw: &'a str,
     end: usize,
     block_depth: usize,
+    definite: bool,
 }
 
 impl Lexeme<'_> {
@@ -347,12 +356,27 @@ impl<'a> Tokens<'a> {
         self.branches.last().is_none_or(|branch| branch.live)
     }
 
+    fn definite_header(&self, start: usize) -> bool {
+        if self.block_depth == 0 {
+            return true;
+        }
+        // A guaranteed branch can still concatenate its header with earlier
+        // rendered text. Require a newline after the preceding tag that
+        // cannot be removed by that tag's right whitespace control.
+        self.block_depth == self.branches.len()
+            && self.branches.iter().all(|b| b.certain)
+            && self.text[self.offset..start].contains('\n')
+            && self.text.as_bytes().get(self.offset.saturating_sub(3)) != Some(&b'-')
+    }
+
     fn branch_tag(&mut self, keyword: &str, args: &str) {
         match keyword {
             "if" => {
                 let mut branch = Branch {
                     live: false,
                     fallthrough: self.live(),
+                    prior_false: true,
+                    certain: false,
                 };
                 branch.arm(args);
                 self.branches.push(branch);
@@ -375,6 +399,8 @@ impl<'a> Tokens<'a> {
 struct Branch {
     live: bool,
     fallthrough: bool,
+    prior_false: bool,
+    certain: bool,
 }
 
 impl Branch {
@@ -382,6 +408,8 @@ impl Branch {
         let condition = condition.trim();
         self.live = self.fallthrough && condition != "false";
         self.fallthrough &= condition != "true";
+        self.certain = self.prior_false && condition == "true";
+        self.prior_false &= condition == "false";
     }
 }
 
@@ -468,6 +496,7 @@ impl<'a> Iterator for Tokens<'a> {
                             raw: &self.text[start..self.offset],
                             end: self.offset,
                             block_depth: self.block_depth,
+                            definite: false,
                         });
                     }
                     continue;
@@ -489,6 +518,7 @@ impl<'a> Iterator for Tokens<'a> {
                     raw: &self.text[start..end],
                     end,
                     block_depth: self.block_depth,
+                    definite: kind == LeftSquareBracket && self.definite_header(start),
                 });
             }
         }

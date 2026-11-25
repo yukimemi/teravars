@@ -455,6 +455,105 @@ fn rendered_table_header_keeps_include_table_local() {
 }
 
 #[test]
+fn definite_conditional_namespace_header_loads_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let mut ctx = Context::new();
+    ctx.insert("enabled", &false);
+    for header in [
+        "{% if true %}\n[teravars]\n{% endif %}",
+        "{%- if true %}\n[teravars]\n{% endif %}",
+        "{% if false %}\n[app]\n{% else %}\n[teravars]\n{% endif %}",
+        "{% if false %}\n[app]\n{% elif true %}\n[teravars]\n{% endif %}",
+        "{% if true %}\n{% if true %}\n[teravars]\n{% endif %}\n{% endif %}",
+        "{% if enabled %}\n[app]\n{% endif %}\n{% if true %}\n[teravars]\n{% endif %}",
+    ] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("ready = {{{{ vars.ready }}}}\n{header}\ninclude = ['machine.toml']\n"),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &ctx)
+            .unwrap_or_else(|err| panic!("{header}: {err}"));
+        assert_eq!(merged.config["ready"].as_bool(), Some(true));
+    }
+}
+
+#[test]
+fn whitespace_trimmed_conditional_header_keeps_include_table_local() {
+    let dir = TempDir::new().unwrap();
+    for header in [
+        "{%- if true %}[teravars]\n{% endif %}",
+        "{%- if true -%}\n[teravars]\n{% endif %}",
+        "{%- if true %}{% if true -%}\n[teravars]\n{% endif %}{% endif %}",
+    ] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("[app]\n{{{{ \"#\" }}}}\n{header}\ninclude = ['missing.toml']\n"),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &Context::new())
+            .unwrap_or_else(|err| panic!("{header}: {err}"));
+        assert_eq!(
+            merged.config["app"]["include"][0].as_str(),
+            Some("missing.toml")
+        );
+    }
+}
+
+#[test]
+fn conditional_header_after_rendered_multiline_string_opening_is_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    let mut ctx = Context::new();
+    ctx.insert("opening", &"note = \"\"\"");
+    ctx.insert("closing", &"\"\"\"");
+    for intermediate in ["", "[other]\n"] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!(
+                "[app]\n{{{{ opening }}}}\n{intermediate}\
+                 {{% if true %}}\n[teravars]\n{{% endif %}}\n\
+                 include = ['missing.toml']\n{{{{ closing }}}}\n"
+            ),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &ctx).unwrap();
+        assert_eq!(
+            merged.config["app"]["note"].as_str(),
+            Some(format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str())
+        );
+        assert!(!merged.config.contains_key("other"));
+    }
+}
+
+#[test]
+fn potentially_active_namespace_header_keeps_include_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let mut ctx = Context::new();
+    ctx.insert("enabled", &false);
+    for header in [
+        "{% if enabled %}\n[app]\n{% else %}\n[teravars]\n{% endif %}",
+        "{% if enabled %}\n[app]\n{% elif true %}\n[teravars]\n{% endif %}",
+        "{% if not enabled %}\n{% if true %}\n[teravars]\n{% endif %}\n{% endif %}",
+        "{% for item in [1] %}\n{% if true %}\n[teravars]\n{% endif %}\n{% endfor %}",
+    ] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("{header}\ninclude = ['machine.toml']\n"),
+        );
+        let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+        assert!(
+            matches!(&err, Error::Extract(message)
+                if message.contains("config.toml `teravars.include`")
+                    && message.contains("owning table depends on Tera rendering")),
+            "{header}: {err}"
+        );
+    }
+}
+
+#[test]
 fn rendered_namespace_header_makes_include_ambiguous() {
     let dir = TempDir::new().unwrap();
     let main = write(
