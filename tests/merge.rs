@@ -502,6 +502,31 @@ fn whitespace_trimmed_conditional_header_keeps_include_table_local() {
 }
 
 #[test]
+fn conditional_header_after_rendered_multiline_string_opening_is_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    let mut ctx = Context::new();
+    ctx.insert("opening", &"note = \"\"\"");
+    ctx.insert("closing", &"\"\"\"");
+    for intermediate in ["", "[other]\n"] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!(
+                "[app]\n{{{{ opening }}}}\n{intermediate}\
+                 {{% if true %}}\n[teravars]\n{{% endif %}}\n\
+                 include = ['missing.toml']\n{{{{ closing }}}}\n"
+            ),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &ctx).unwrap();
+        assert_eq!(
+            merged.config["app"]["note"].as_str(),
+            Some(format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str())
+        );
+        assert!(!merged.config.contains_key("other"));
+    }
+}
+
+#[test]
 fn potentially_active_namespace_header_keeps_include_ambiguous() {
     let dir = TempDir::new().unwrap();
     write(&dir, "machine.toml", "[vars]\nready = true\n");

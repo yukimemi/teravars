@@ -120,7 +120,9 @@ Semantics:
   `true` after only literal `false` conditions, or the corresponding
   `else`) establish ownership, provided all enclosing blocks are also
   guaranteed `if` arms and a newline separates the header from the
-  preceding Tera tag without right whitespace trimming. A potentially
+  preceding Tera tag without right whitespace trimming. A preceding
+  standalone Tera expression prevents conditional headers from establishing
+  ownership, because its output may open a multiline string. A potentially
   active header, a templated table name, or a Tera expression at the start
   of a statement may make ownership ambiguous until the next definite
   static header. If rendering produces an ambiguous include directive that

@@ -65,6 +65,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let mut root = None;
     let mut namespaced = None;
     let mut ambiguous = None;
+    let mut rendered_statement = false;
 
     while let Some(first) = tokens.next() {
         let owner = match first.kind {
@@ -74,7 +75,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 // A guaranteed static header restores definite ownership.
                 let mut end = first.end;
                 let mut closing_end = None;
-                section = if !first.definite {
+                section = if !first.definite || (first.block_depth != 0 && rendered_statement) {
                     Section::Ambiguous
                 } else if tokens
                     .next_if(|t| t.block_depth == first.block_depth && t.is_key("teravars"))
@@ -109,6 +110,9 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 continue;
             }
             Atom if first.raw.starts_with("{{") => {
+                // Standalone output can open a multiline TOML string.
+                // A later conditional header cannot rule this out.
+                rendered_statement = true;
                 section = Section::Ambiguous;
                 None
             }
