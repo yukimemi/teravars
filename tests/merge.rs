@@ -553,7 +553,9 @@ fn conditional_header_after_rendered_multiline_string_opening_is_ambiguous() {
                 .unwrap_or_else(|err| panic!("{statement}: {err}"));
             assert_eq!(
                 merged.config["app"]["note"].as_str(),
-                Some(format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str())
+                Some(
+                    format!("{intermediate}\n[teravars]\n\ninclude = ['missing.toml']\n").as_str()
+                )
             );
             assert!(!merged.config.contains_key("other"));
         }
