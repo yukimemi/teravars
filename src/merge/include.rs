@@ -70,14 +70,18 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
         let owner = match first.kind {
             Newline => continue,
             LeftSquareBracket => {
-                // A conditional header may change the active table. Only
-                // another static header can make the scope definite again.
+                // A potentially active header may change the active table.
+                // A guaranteed static header restores definite ownership.
                 let mut end = first.end;
                 let mut closing_end = None;
-                section = if first.block_depth != 0 {
+                section = if !first.definite {
                     Section::Ambiguous
-                } else if take_key(&mut tokens, "teravars")
-                    && let Some(close) = take(&mut tokens, RightSquareBracket)
+                } else if tokens
+                    .next_if(|t| t.block_depth == first.block_depth && t.is_key("teravars"))
+                    .is_some()
+                    && let Some(close) = tokens.next_if(|t| {
+                        t.block_depth == first.block_depth && t.kind == RightSquareBracket
+                    })
                 {
                     closing_end = Some(close.end);
                     if tokens.peek().is_none_or(|t| t.kind == Newline) {
@@ -298,6 +302,7 @@ struct Lexeme<'a> {
     raw: &'a str,
     end: usize,
     block_depth: usize,
+    definite: bool,
 }
 
 impl Lexeme<'_> {
@@ -347,12 +352,18 @@ impl<'a> Tokens<'a> {
         self.branches.last().is_none_or(|branch| branch.live)
     }
 
+    fn definite(&self) -> bool {
+        self.block_depth == self.branches.len() && self.branches.iter().all(|b| b.certain)
+    }
+
     fn branch_tag(&mut self, keyword: &str, args: &str) {
         match keyword {
             "if" => {
                 let mut branch = Branch {
                     live: false,
                     fallthrough: self.live(),
+                    prior_false: true,
+                    certain: false,
                 };
                 branch.arm(args);
                 self.branches.push(branch);
@@ -375,6 +386,8 @@ impl<'a> Tokens<'a> {
 struct Branch {
     live: bool,
     fallthrough: bool,
+    prior_false: bool,
+    certain: bool,
 }
 
 impl Branch {
@@ -382,6 +395,8 @@ impl Branch {
         let condition = condition.trim();
         self.live = self.fallthrough && condition != "false";
         self.fallthrough &= condition != "true";
+        self.certain = self.prior_false && condition == "true";
+        self.prior_false &= condition == "false";
     }
 }
 
@@ -468,6 +483,7 @@ impl<'a> Iterator for Tokens<'a> {
                             raw: &self.text[start..self.offset],
                             end: self.offset,
                             block_depth: self.block_depth,
+                            definite: self.definite(),
                         });
                     }
                     continue;
@@ -489,6 +505,7 @@ impl<'a> Iterator for Tokens<'a> {
                     raw: &self.text[start..end],
                     end,
                     block_depth: self.block_depth,
+                    definite: self.definite(),
                 });
             }
         }
