@@ -88,8 +88,8 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 } else {
                     Section::Other
                 };
-                while let Some(token) = tokens
-                    .next_if(|t| t.kind != Newline && t.block_depth >= first.block_depth)
+                while let Some(token) =
+                    tokens.next_if(|t| t.kind != Newline && t.block_depth >= first.block_depth)
                 {
                     end = token.end;
                     if token.kind == RightSquareBracket {
