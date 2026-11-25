@@ -116,9 +116,10 @@ Semantics:
   blocks. An invalid declaration returns an error naming the file and
   directive rather than loading only some paths or silently skipping it.
   Statically unreachable `if` arms with literal boolean conditions do not
-  affect table ownership. If a potentially active header makes ownership
-  ambiguous and rendering produces an include directive that was not loaded,
-  loading fails instead of dropping it.
+  affect table ownership. A potentially active header or a Tera expression
+  at the start of a statement may make table ownership ambiguous until the
+  next static header. If rendering produces an ambiguous include directive
+  that was not loaded, loading fails instead of dropping it.
   If rendering fails before ownership can be checked, the error names the
   ambiguous directive and retains the render failure.
 - Paths are **rendered through Tera** with `system.*` and any

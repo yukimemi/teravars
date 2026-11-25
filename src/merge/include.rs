@@ -36,7 +36,7 @@ impl Includes {
                 return Err(invalid(
                     path,
                     name,
-                    "owning table depends on Tera control flow",
+                    "owning table depends on Tera rendering",
                 ));
             }
         }
@@ -48,9 +48,7 @@ impl Includes {
             Some(name) => invalid(
                 path,
                 name,
-                format_args!(
-                    "owning table depends on Tera control flow; rendering failed: {cause}"
-                ),
+                format_args!("owning table depends on Tera rendering; rendering failed: {cause}"),
             ),
             None => Error::Render(format!("{}: {cause}", path.display())),
         }
@@ -89,6 +87,10 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                     .is_some()
                 {}
                 continue;
+            }
+            Atom if first.raw.starts_with("{{") => {
+                section = Section::Ambiguous;
+                None
             }
             _ if first.block_depth != 0 => None,
             _ if first.is_key(ROOT) => match section {

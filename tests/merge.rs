@@ -434,6 +434,70 @@ include = ["missing.toml"]
 }
 
 #[test]
+fn rendered_table_header_keeps_include_table_local() {
+    let dir = TempDir::new().unwrap();
+    for header in [
+        "{{ '[app]' }}",
+        "{{- '[app]' }}",
+        "{% if true %}\n{{ '[app]' }}\n{% endif %}",
+    ] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("{header}\ninclude = ['missing.toml']\n"),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+        assert_eq!(
+            merged.config["app"]["include"][0].as_str(),
+            Some("missing.toml")
+        );
+    }
+}
+
+#[test]
+fn rendered_namespace_header_makes_include_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    let main = write(
+        &dir,
+        "config.toml",
+        "{{ '[teravars]' }}\ninclude = ['missing.toml']\n",
+    );
+    let err = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `teravars.include`")
+                && message.contains("owning table depends on Tera")),
+        "{err}"
+    );
+}
+
+#[test]
+fn static_header_after_rendered_header_restores_include_ownership() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        "{{ '[app]' }}\nready = {{ vars.ready }}\n[teravars]\ninclude = ['machine.toml']\n",
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["app"]["ready"].as_bool(), Some(true));
+}
+
+#[test]
+fn root_include_after_value_expression_remains_static() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        "ready = {{ vars.ready }}\ninclude = ['machine.toml']\n",
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
 fn rendered_root_include_with_ambiguous_ownership_is_an_error() {
     let dir = TempDir::new().unwrap();
     let main = write(
@@ -452,7 +516,7 @@ include = ["machine.toml"]
     assert!(
         matches!(&err, Error::Extract(message)
             if message.contains("config.toml `include`")
-            && message.contains("owning table depends on Tera control flow")),
+            && message.contains("owning table depends on Tera rendering")),
         "{err}"
     );
 }
@@ -478,7 +542,7 @@ ready = "{{ vars.ready }}"
     assert!(
         matches!(&err, Error::Extract(message)
             if message.contains("config.toml `include`")
-                && message.contains("owning table depends on Tera control flow")
+                && message.contains("owning table depends on Tera rendering")
                 && message.contains("ready")),
         "{err}"
     );
