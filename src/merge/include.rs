@@ -86,6 +86,13 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                     .next_if(|t| t.kind != Newline && t.block_depth >= first.block_depth)
                     .is_some()
                 {}
+                // The lexer skips Tera control tags, so inspect the source
+                // through the end of the consumed header.
+                let end = tokens.peek().map_or(text.len(), |t| t.end - t.raw.len());
+                let header = &text[first.end..end];
+                if header.contains("{{") || header.contains("{%") {
+                    section = Section::Ambiguous;
+                }
                 continue;
             }
             Atom if first.raw.starts_with("{{") => {

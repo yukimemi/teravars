@@ -472,6 +472,52 @@ fn rendered_namespace_header_makes_include_ambiguous() {
 }
 
 #[test]
+fn templated_header_include_depends_on_rendered_owner() {
+    let dir = TempDir::new().unwrap();
+    let mut ctx = Context::new();
+    for (header, section) in [
+        (r#"["{{ section }}"]"#, "teravars"),
+        ("[{{ section }}]", "teravars"),
+        ("[tera{{ section }}]", "vars"),
+        ("[tera{% if section == 'vars' %}vars{% endif %}]", "vars"),
+    ] {
+        ctx.insert("section", &section);
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("{header}\ninclude = ['machine.toml']\n"),
+        );
+        let err = load_merged([&main], &mut Engine::new(), &ctx).unwrap_err();
+        assert!(
+            matches!(&err, Error::Extract(message)
+                if message.contains("config.toml `teravars.include`")
+                    && message.contains("owning table depends on Tera rendering")),
+            "{header}: {err}"
+        );
+    }
+}
+
+#[test]
+fn templated_header_keeps_application_include_and_restores_static_ownership() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let mut ctx = Context::new();
+    ctx.insert("section", &"app");
+    let main = write(
+        &dir,
+        "config.toml",
+        "[\"{{ section }}\"]\ninclude = ['missing.toml']\nready = {{ vars.ready }}\n\
+         [teravars]\ninclude = ['machine.toml']\n",
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &ctx).unwrap();
+    assert_eq!(merged.config["app"]["ready"].as_bool(), Some(true));
+    assert_eq!(
+        merged.config["app"]["include"][0].as_str(),
+        Some("missing.toml")
+    );
+}
+
+#[test]
 fn static_header_after_rendered_header_restores_include_ownership() {
     let dir = TempDir::new().unwrap();
     write(&dir, "machine.toml", "[vars]\nready = true\n");
