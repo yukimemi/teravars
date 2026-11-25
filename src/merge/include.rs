@@ -352,8 +352,17 @@ impl<'a> Tokens<'a> {
         self.branches.last().is_none_or(|branch| branch.live)
     }
 
-    fn definite(&self) -> bool {
-        self.block_depth == self.branches.len() && self.branches.iter().all(|b| b.certain)
+    fn definite_header(&self, start: usize) -> bool {
+        if self.block_depth == 0 {
+            return true;
+        }
+        // A guaranteed branch can still concatenate its header with earlier
+        // rendered text. Require a newline after the preceding tag that
+        // cannot be removed by that tag's right whitespace control.
+        self.block_depth == self.branches.len()
+            && self.branches.iter().all(|b| b.certain)
+            && self.text[self.offset..start].contains('\n')
+            && self.text.as_bytes().get(self.offset.saturating_sub(3)) != Some(&b'-')
     }
 
     fn branch_tag(&mut self, keyword: &str, args: &str) {
@@ -483,7 +492,7 @@ impl<'a> Iterator for Tokens<'a> {
                             raw: &self.text[start..self.offset],
                             end: self.offset,
                             block_depth: self.block_depth,
-                            definite: self.definite(),
+                            definite: false,
                         });
                     }
                     continue;
@@ -505,7 +514,7 @@ impl<'a> Iterator for Tokens<'a> {
                     raw: &self.text[start..end],
                     end,
                     block_depth: self.block_depth,
-                    definite: self.definite(),
+                    definite: kind == LeftSquareBracket && self.definite_header(start),
                 });
             }
         }

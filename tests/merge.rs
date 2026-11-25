@@ -462,6 +462,7 @@ fn definite_conditional_namespace_header_loads_include() {
     ctx.insert("enabled", &false);
     for header in [
         "{% if true %}\n[teravars]\n{% endif %}",
+        "{%- if true %}\n[teravars]\n{% endif %}",
         "{% if false %}\n[app]\n{% else %}\n[teravars]\n{% endif %}",
         "{% if false %}\n[app]\n{% elif true %}\n[teravars]\n{% endif %}",
         "{% if true %}\n{% if true %}\n[teravars]\n{% endif %}\n{% endif %}",
@@ -475,6 +476,28 @@ fn definite_conditional_namespace_header_loads_include() {
         let merged = load_merged([&main], &mut Engine::new(), &ctx)
             .unwrap_or_else(|err| panic!("{header}: {err}"));
         assert_eq!(merged.config["ready"].as_bool(), Some(true));
+    }
+}
+
+#[test]
+fn whitespace_trimmed_conditional_header_keeps_include_table_local() {
+    let dir = TempDir::new().unwrap();
+    for header in [
+        "{%- if true %}[teravars]\n{% endif %}",
+        "{%- if true -%}\n[teravars]\n{% endif %}",
+        "{%- if true %}{% if true -%}\n[teravars]\n{% endif %}{% endif %}",
+    ] {
+        let main = write(
+            &dir,
+            "config.toml",
+            &format!("[app]\n{{{{ \"#\" }}}}\n{header}\ninclude = ['missing.toml']\n"),
+        );
+        let merged = load_merged([&main], &mut Engine::new(), &Context::new())
+            .unwrap_or_else(|err| panic!("{header}: {err}"));
+        assert_eq!(
+            merged.config["app"]["include"][0].as_str(),
+            Some("missing.toml")
+        );
     }
 }
 
