@@ -88,11 +88,11 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 {}
                 continue;
             }
-            _ if first.block_depth != 0 => None,
             Atom if first.raw.starts_with("{{") => {
                 section = Section::Ambiguous;
                 None
             }
+            _ if first.block_depth != 0 => None,
             _ if first.is_key(ROOT) => match section {
                 Section::Root => Some((&mut root, ROOT)),
                 Section::Teravars => Some((&mut namespaced, NAMESPACED)),

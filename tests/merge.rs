@@ -436,7 +436,11 @@ include = ["missing.toml"]
 #[test]
 fn rendered_table_header_keeps_include_table_local() {
     let dir = TempDir::new().unwrap();
-    for header in ["{{ '[app]' }}", "{{- '[app]' }}"] {
+    for header in [
+        "{{ '[app]' }}",
+        "{{- '[app]' }}",
+        "{% if true %}\n{{ '[app]' }}\n{% endif %}",
+    ] {
         let main = write(
             &dir,
             "config.toml",
