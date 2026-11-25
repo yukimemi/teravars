@@ -130,6 +130,13 @@ Semantics:
   was not loaded, loading fails instead of dropping it.
   If rendering fails before ownership can be checked, the error names the
   ambiguous directive and retains the render failure.
+  This also affects previously accepted configurations such as
+  `ready = {{ vars.ready }}` followed by `{% if true %}` wrapping a
+  `[teravars]` header and then a static `include` assignment. The include
+  can no longer supply `vars.ready` in that arrangement. Remove the
+  redundant conditional around `[teravars]` to retain the original
+  assignment order, or put the conditional header and its include before
+  the output expression (in a separate application table).
 - Paths are **rendered through Tera** with `system.*` and any
   caller-supplied context in scope, but **not** with `vars` (vars
   haven't accumulated yet at the point includes resolve).
