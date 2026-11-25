@@ -480,6 +480,7 @@ fn templated_header_include_depends_on_rendered_owner() {
         ("[{{ section }}]", "teravars"),
         ("[tera{{ section }}]", "vars"),
         ("[tera{% if section == 'vars' %}vars{% endif %}]", "vars"),
+        (r#"["tera{# comment #}vars"]"#, "teravars"),
     ] {
         ctx.insert("section", &section);
         let main = write(

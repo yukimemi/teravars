@@ -99,7 +99,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                 // Inspect skipped Tera tags inside the header, not statements
                 // following its closing bracket.
                 let header = &text[first.end..closing_end.unwrap_or(end)];
-                if header.contains("{{") || header.contains("{%") {
+                if header.contains("{{") || header.contains("{%") || header.contains("{#") {
                     section = Section::Ambiguous;
                 }
                 continue;
