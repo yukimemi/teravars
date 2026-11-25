@@ -72,24 +72,33 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
             LeftSquareBracket => {
                 // A conditional header may change the active table. Only
                 // another static header can make the scope definite again.
+                let mut end = first.end;
+                let mut closing_end = None;
                 section = if first.block_depth != 0 {
                     Section::Ambiguous
                 } else if take_key(&mut tokens, "teravars")
-                    && take(&mut tokens, RightSquareBracket).is_some()
-                    && tokens.peek().is_none_or(|t| t.kind == Newline)
+                    && let Some(close) = take(&mut tokens, RightSquareBracket)
                 {
-                    Section::Teravars
+                    closing_end = Some(close.end);
+                    if tokens.peek().is_none_or(|t| t.kind == Newline) {
+                        Section::Teravars
+                    } else {
+                        Section::Other
+                    }
                 } else {
                     Section::Other
                 };
-                while tokens
+                while let Some(token) = tokens
                     .next_if(|t| t.kind != Newline && t.block_depth >= first.block_depth)
-                    .is_some()
-                {}
-                // The lexer skips Tera control tags, so inspect the source
-                // through the end of the consumed header.
-                let end = tokens.peek().map_or(text.len(), |t| t.end - t.raw.len());
-                let header = &text[first.end..end];
+                {
+                    end = token.end;
+                    if token.kind == RightSquareBracket {
+                        closing_end = Some(end);
+                    }
+                }
+                // Inspect skipped Tera tags inside the header, not statements
+                // following its closing bracket.
+                let header = &text[first.end..closing_end.unwrap_or(end)];
                 if header.contains("{{") || header.contains("{%") {
                     section = Section::Ambiguous;
                 }

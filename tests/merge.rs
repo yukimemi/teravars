@@ -518,6 +518,20 @@ fn templated_header_keeps_application_include_and_restores_static_ownership() {
 }
 
 #[test]
+fn static_namespace_header_with_trailing_tera_statement_loads_include() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "machine.toml", "[vars]\nready = true\n");
+    let main = write(
+        &dir,
+        "config.toml",
+        "ready = {{ vars.ready }}\n[teravars] {% set enabled = true %}\n\
+         include = ['machine.toml']\n",
+    );
+    let merged = load_merged([&main], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["ready"].as_bool(), Some(true));
+}
+
+#[test]
 fn static_header_after_rendered_header_restores_include_ownership() {
     let dir = TempDir::new().unwrap();
     write(&dir, "machine.toml", "[vars]\nready = true\n");
