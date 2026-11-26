@@ -169,14 +169,14 @@ pub fn resolve_in_context_with_max_iter(
     extra_ctx: &Context,
     max_iter: usize,
 ) -> Result<()> {
-    resolve_with_renderer(vars, extra_ctx, max_iter, |s, ctx| engine.render(s, ctx))
+    resolve_with_renderer(vars, extra_ctx, max_iter, |s, ctx, _| engine.render(s, ctx))
 }
 
 pub(crate) fn resolve_with_renderer(
     vars: &mut Table,
     extra_ctx: &Context,
     max_iter: usize,
-    mut render: impl FnMut(&str, &Context) -> Result<String>,
+    mut render: impl FnMut(&str, &Context, usize) -> Result<String>,
 ) -> Result<()> {
     if vars.is_empty() {
         return Ok(());
@@ -186,12 +186,15 @@ pub(crate) fn resolve_with_renderer(
     // caller-supplied context once and refresh only the `vars` binding on
     // each iteration of the fixpoint loop.
     let mut ctx = extra_ctx.clone();
-    for _ in 0..max_iter {
+    for iteration in 0..max_iter {
         ctx.insert("vars", &*vars);
 
         let mut next = Table::new();
         for (k, v) in vars.iter() {
-            next.insert(k.clone(), render_value(v, &mut render, &ctx)?);
+            next.insert(
+                k.clone(),
+                render_value(v, &mut |s, ctx| render(s, ctx, iteration), &ctx)?,
+            );
         }
 
         let converged = next == *vars;

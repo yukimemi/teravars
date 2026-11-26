@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use toml::{Table, Value};
 
-use crate::comments::{tera_tag_end, trim_tera_tag};
+use crate::comments::tera_tag_end;
 use crate::{Error, Result};
 
 /// Opt-in runtime-only root variable names for [`super::load_merged_with`].
@@ -236,7 +236,7 @@ impl<'a> Deferred<'a> {
     // Keep markers opaque through both vars resolution passes. The original
     // tags are only restored into parsed string values after the final pass.
     pub(super) fn protect(&mut self, text: &str, path: &Path, allow: bool) -> Result<String> {
-        self.protect_impl(text, path, allow, true, None)
+        self.protect_impl(text, path, allow, true, None, true)
     }
 
     fn protect_impl(
@@ -246,6 +246,7 @@ impl<'a> Deferred<'a> {
         allow: bool,
         document: bool,
         ctx: Option<&tera::Context>,
+        classify_runtime: bool,
     ) -> Result<String> {
         if !self.active() {
             return Ok(text.to_owned());
@@ -288,7 +289,7 @@ impl<'a> Deferred<'a> {
             };
             let end = start + 2 + end;
             let tag = &text[start..end];
-            let body = trim_tera_tag(&tag[2..tag.len() - 2]);
+            let body = expression_body(&tag[2..tag.len() - 2]);
             let words = tokens(body);
             let first = words.first().copied().unwrap_or("");
             if kind == '%' && first == "raw" {
@@ -365,7 +366,10 @@ impl<'a> Deferred<'a> {
                         path.display()
                     )));
                 }
-                if let Some(name) = refs.iter().find(|n| self.options.matches(n) && !bound(n)) {
+                if let Some(name) = refs
+                    .iter()
+                    .find(|n| classify_runtime && self.options.matches(n) && !bound(n))
+                {
                     let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
                     let fail = |why| {
                         Error::Render(format!(
@@ -414,7 +418,10 @@ impl<'a> Deferred<'a> {
                         &refs,
                         ctx,
                         &self.prefix,
-                        self.options,
+                        &|name| {
+                            self.options.matches(name)
+                                && (classify_runtime || !ctx.contains_key(name))
+                        },
                         &bound,
                         simple_copy,
                     ) {
@@ -502,12 +509,24 @@ impl<'a> Deferred<'a> {
             vars,
             ctx,
             crate::vars::DEFAULT_MAX_RESOLVE_ITERATIONS,
-            |text, ctx| {
+            |text, ctx, iteration| {
                 if !text.contains("{{") && !text.contains("{%") {
                     return engine.render(text, ctx);
                 }
+                // The document scan already classified free runtime references
+                // in extracted values. On the first per-file iteration, let
+                // surviving tags use the caller context just as ordinary vars
+                // extraction does; their enclosing document locals are absent.
+                // Subsequent iterations can expose new, unclassified tags.
                 let protected = self
-                    .protect_impl(text, path, true, false, Some(ctx))
+                    .protect_impl(
+                        text,
+                        path,
+                        true,
+                        false,
+                        Some(ctx),
+                        !best_effort || iteration != 0,
+                    )
                     .inspect_err(|_| invalid = true)?;
                 engine.render(&protected, ctx)
             },
@@ -526,7 +545,7 @@ impl<'a> Deferred<'a> {
         ctx: &tera::Context,
     ) -> Result<()> {
         if self.active() {
-            self.protect_impl(text, path, true, true, Some(ctx))?;
+            self.protect_impl(text, path, true, true, Some(ctx), true)?;
         }
         Ok(())
     }
@@ -815,7 +834,7 @@ fn tainted(
     value: &tera::Value,
     ctx: &tera::Context,
     prefix: &str,
-    options: &LoadOptions,
+    runtime_name: &impl Fn(&str) -> bool,
     visiting: &mut HashSet<usize>,
 ) -> bool {
     let address = value as *const _ as usize;
@@ -833,12 +852,12 @@ fn tainted(
                 let Some(end) = tera_tag_end(rest, b"}}") else {
                     break;
                 };
-                let words = tokens(trim_tera_tag(&rest[..end - 2]));
+                let words = tokens(expression_body(&rest[..end - 2]));
                 for root in references(&words) {
-                    if options.matches(root)
+                    if runtime_name(root)
                         || ctx.get(root).is_some_and(|v| {
                             let (selected, _) = select_path(&words, root, v);
-                            tainted(selected, ctx, prefix, options, visiting)
+                            tainted(selected, ctx, prefix, runtime_name, visiting)
                         })
                     {
                         found = true;
@@ -853,13 +872,13 @@ fn tainted(
             found
         }
     } else {
-        value
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| tainted(v, ctx, prefix, options, visiting)))
-            || value.as_map().is_some_and(|m| {
-                m.values()
-                    .any(|v| tainted(v, ctx, prefix, options, visiting))
-            })
+        value.as_array().is_some_and(|a| {
+            a.iter()
+                .any(|v| tainted(v, ctx, prefix, runtime_name, visiting))
+        }) || value.as_map().is_some_and(|m| {
+            m.values()
+                .any(|v| tainted(v, ctx, prefix, runtime_name, visiting))
+        })
     };
     visiting.remove(&address);
     result
@@ -908,7 +927,7 @@ fn indirect_use(
     refs: &[&str],
     ctx: &tera::Context,
     prefix: &str,
-    options: &LoadOptions,
+    runtime_name: &impl Fn(&str) -> bool,
     bound: &impl Fn(&str) -> bool,
     simple_copy: bool,
 ) -> bool {
@@ -922,11 +941,16 @@ fn indirect_use(
             .position(|word| std::ptr::eq(word.as_ptr(), root.as_ptr()))
             .unwrap();
         let (value, end) = select_path(words, root, value);
-        if tainted(value, ctx, prefix, options, &mut HashSet::new())
+        if tainted(value, ctx, prefix, runtime_name, &mut HashSet::new())
             && !(simple_copy && start == 0 && end == words.len() && value.is_string())
         {
             return true;
         }
     }
     false
+}
+
+fn expression_body(body: &str) -> &str {
+    let body = body.strip_prefix('-').unwrap_or(body);
+    body.strip_suffix('-').unwrap_or(body).trim()
 }

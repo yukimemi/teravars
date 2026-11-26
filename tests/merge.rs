@@ -1523,12 +1523,41 @@ fn malformed_runtime_expression_is_not_deferred() {
     use teravars::{LoadOptions, load_merged_with};
     let dir = TempDir::new().unwrap();
     let options = LoadOptions::new().defer("group");
-    let path = write(&dir, "config.toml", "value = '{{ group + }}'");
-    assert!(load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).is_err());
+    for expression in ["{{ group + }}", "{{ group - }}", "{{- group - }}"] {
+        let path = write(&dir, "config.toml", &format!("value = '{expression}'"));
+        assert!(
+            load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).is_err(),
+            "{expression}"
+        );
+    }
     let path = write(&dir, "config.toml", "value = '{{ group | runtime_only }}'");
     let merged = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap();
     assert_eq!(
         merged.config["value"].as_str(),
         Some("{{ group | runtime_only }}")
     );
+}
+
+#[test]
+fn runtime_names_shadowed_in_extracted_vars_keep_load_time_resolution() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        "{% set group = 'local' %}\n[vars]\na = '{{ group }}'\n[app]\nvalue = '{{ vars.a | upper }}'",
+    );
+    let mut ctx = Context::new();
+    ctx.insert("group", &"load");
+    let baseline = load_merged([&path], &mut Engine::new(), &ctx).unwrap();
+    let merged = load_merged_with(
+        [&path],
+        &mut Engine::new(),
+        &ctx,
+        &LoadOptions::new().defer("group"),
+    )
+    .unwrap();
+    assert_eq!(merged.vars, baseline.vars);
+    assert_eq!(merged.config, baseline.config);
+    assert_eq!(merged.config["app"]["value"].as_str(), Some("LOAD"));
 }
