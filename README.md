@@ -156,6 +156,94 @@ Use `[teravars] include = [...]` to keep the directive in the reserved
 `teravars` namespace. An `include` key in any other table is ordinary
 application config.
 
+### Embedded string sources and rendered output
+
+Use `ConfigSource` with `load_merged_sources` / `load_merged_rendered` to
+combine named in-memory strings (such as `include_str!` defaults) and on-disk
+files through the exact same loader.
+
+#### Embedded defaults (`todoke` pattern)
+
+```rust
+use teravars::{ConfigSource, Engine, load_merged_sources, system_context};
+
+const DEFAULT_CONFIG: &str = include_str!("../defaults.toml");
+
+let mut engine = Engine::new();
+let sources = vec![
+    ConfigSource::string("<embedded defaults>", DEFAULT_CONFIG),
+    ConfigSource::path(user_config_path),
+];
+let merged = load_merged_sources(sources, &mut engine, &system_context())?;
+let cfg: MyConfig = merged.config.try_into()?;
+```
+
+A string source's `name` is used only for diagnostics and duplicate detection —
+never as a filesystem path. If an embedded string needs relative `include`
+paths, pass an explicit absolute base directory with
+`ConfigSource::string_with_base_dir(name, content, base_dir)`. Relative
+includes from a string source with no `base_dir` fail with a named error
+instead of silently resolving against the process working directory; absolute
+include paths work either way.
+
+#### Direct deserialization and `config show --rendered`
+
+Use `load_merged_rendered` (or `load_merged_rendered_with` when combining with
+`LoadOptions`) to obtain both the merged tables and the actual rendered TOML
+text produced during the single render pass — without re-rendering or
+re-serializing from the merged `toml::Table`:
+
+```rust
+use teravars::{ConfigSource, Engine, load_merged_rendered, system_context};
+
+let mut engine = Engine::new();
+let rendered = load_merged_rendered(
+    [ConfigSource::path(&config_path)],
+    &mut engine,
+    &system_context(),
+)?;
+
+// General case: preserve settings from every included file and root,
+// and exclude reserved directives from the application config.
+let cfg: MyConfig = rendered.merged.config.try_into()?;
+
+// `config show --rendered`: inspect each rendered source in load order
+// (includes before the declaring root).
+for source in &rendered.sources {
+    println!("# --- {} ---\n{}", source.id, source.rendered);
+}
+```
+
+For a consumer that guarantees exactly one root and forbids both the
+root `include` key and the reserved `teravars` namespace, deserialize the
+actual rendered text instead to retain `toml::from_str` line/column
+diagnostics:
+
+```rust
+let root_text = rendered.rendered_root().expect("single root");
+let cfg: MyConfig = toml::from_str(root_text)?;
+```
+
+`rendered_root()` returning `Some` establishes only the single-root
+condition. It does **not** establish that the root is directive-free.
+Do not use this direct-deserialization pattern as a fallback decision
+based solely on `rendered_root()`.
+
+Contract of `RenderedSource::rendered`:
+
+- TOML `#` comments are stripped before rendering while preserving line
+  numbers.
+- Each source's text reflects what was in scope at the moment it rendered
+  (including vars from earlier sources and includes); later sources' overrides
+  are not retroactively reflected.
+- Unlike `merged.config`, any `include` or `[teravars]` directives present in a
+  source remain in its rendered text. When a root uses `include` or the
+  reserved `teravars` namespace (even without includes), or when multiple
+  roots are loaded, deserialize from `rendered.merged.config`.
+- When `LoadOptions` runtime-only deferral is active, deferred tags are
+  restored into valid TOML string literals while keeping the original line
+  structure intact.
+
 ### Runtime-only expressions (todoke / shun)
 
 Use `LoadOptions` with `load_merged_with` when some variables are only

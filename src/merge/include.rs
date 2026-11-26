@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 use std::iter::Peekable;
-use std::path::Path;
 
 use serde::Deserialize;
 use toml::de::ValueDeserializer;
 use toml_parser::lexer::{Lexer, TokenKind};
 use toml_parser::{ParseError, Source, Span};
 
+use super::SourceId;
 use crate::Result;
 use crate::comments::{tera_tag_end, trim_tera_tag};
 use crate::error::Error;
@@ -23,7 +23,7 @@ pub(super) struct Includes {
 }
 
 impl Includes {
-    pub(super) fn check_rendered(&self, parsed: &toml::Table, path: &Path) -> Result<()> {
+    pub(super) fn check_rendered(&self, parsed: &toml::Table, source: &SourceId) -> Result<()> {
         if self.ambiguous.is_none() {
             return Ok(());
         }
@@ -34,7 +34,7 @@ impl Includes {
         for (name, exists) in [(ROOT, parsed.contains_key(ROOT)), (NAMESPACED, namespaced)] {
             if exists && self.name != Some(name) {
                 return Err(invalid(
-                    path,
+                    source,
                     name,
                     "owning table depends on Tera rendering",
                 ));
@@ -43,21 +43,21 @@ impl Includes {
         Ok(())
     }
 
-    pub(super) fn render_error(&self, path: &Path, cause: String) -> Error {
+    pub(super) fn render_error(&self, source: &SourceId, cause: String) -> Error {
         match self.ambiguous {
             Some(name) => invalid(
-                path,
+                source,
                 name,
                 format_args!("owning table depends on Tera rendering; rendering failed: {cause}"),
             ),
-            None => Error::Render(format!("{}: {cause}", path.display())),
+            None => Error::Render(format!("{source}: {cause}")),
         }
     }
 }
 
 // Locate static assignments in the source without requiring unrelated
 // template values to be valid TOML before rendering.
-pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes> {
+pub(super) fn extract_include_paths(text: &str, source: &SourceId) -> Result<Includes> {
     use TokenKind::*;
 
     let mut tokens = Tokens::new(text).peekable();
@@ -133,11 +133,11 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
                     if take(&mut tokens, Equals).is_some()
                         && take(&mut tokens, LeftCurlyBracket).is_some()
                     {
-                        if let Some(value) = inline_include(text, &mut tokens, path)? {
+                        if let Some(value) = inline_include(text, &mut tokens, source)? {
                             if matches!(section, Section::Ambiguous) {
                                 ambiguous = Some(NAMESPACED);
                             } else {
-                                record(&mut namespaced, value, path, NAMESPACED)?;
+                                record(&mut namespaced, value, source, NAMESPACED)?;
                             }
                         }
                     }
@@ -155,7 +155,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
             if matches!(section, Section::Ambiguous) {
                 ambiguous = Some(name);
             } else {
-                record(slot, &text[start..end], path, name)?;
+                record(slot, &text[start..end], source, name)?;
             }
         } else {
             value_end(&mut tokens, &first, false);
@@ -165,7 +165,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let (value, name) = match (root, namespaced) {
         (Some(_), Some(_)) => {
             return Err(Error::IncludeConflict {
-                path: path.to_path_buf(),
+                path: source.to_diagnostic_path(),
             });
         }
         (Some(value), None) => (Some(value), Some(ROOT)),
@@ -175,7 +175,7 @@ pub(super) fn extract_include_paths(text: &str, path: &Path) -> Result<Includes>
     let paths = if let (Some(value), Some(name)) = (value, name) {
         ValueDeserializer::parse(value.trim_matches([' ', '\t', '\r', '\n']))
             .and_then(Vec::<String>::deserialize)
-            .map_err(|err| invalid(path, name, err))?
+            .map_err(|err| invalid(source, name, err))?
     } else {
         Vec::new()
     };
@@ -196,7 +196,7 @@ enum Section {
 fn inline_include<'a>(
     text: &'a str,
     tokens: &mut Peekable<Tokens<'a>>,
-    path: &Path,
+    source: &SourceId,
 ) -> Result<Option<&'a str>> {
     use TokenKind::*;
 
@@ -217,7 +217,7 @@ fn inline_include<'a>(
         };
         if let Some(eq) = eq {
             let end = value_end(tokens, &eq, true);
-            record(&mut value, &text[eq.end..end], path, NAMESPACED)?;
+            record(&mut value, &text[eq.end..end], source, NAMESPACED)?;
         } else {
             value_end(tokens, &first, true);
         }
@@ -228,20 +228,25 @@ fn inline_include<'a>(
     if take(tokens, RightCurlyBracket).is_some() || value.is_none() {
         Ok(value)
     } else {
-        Err(invalid(path, NAMESPACED, "unclosed inline table"))
+        Err(invalid(source, NAMESPACED, "unclosed inline table"))
     }
 }
 
-fn record<'a>(slot: &mut Option<&'a str>, value: &'a str, path: &Path, name: &str) -> Result<()> {
+fn record<'a>(
+    slot: &mut Option<&'a str>,
+    value: &'a str,
+    source: &SourceId,
+    name: &str,
+) -> Result<()> {
     if slot.replace(value).is_some() {
-        Err(invalid(path, name, "duplicate declaration"))
+        Err(invalid(source, name, "duplicate declaration"))
     } else {
         Ok(())
     }
 }
 
-fn invalid(path: &Path, name: &str, err: impl std::fmt::Display) -> Error {
-    Error::Extract(format!("{} `{name}`: {err}", path.display()))
+fn invalid(source: &SourceId, name: &str, err: impl std::fmt::Display) -> Error {
+    Error::Extract(format!("{source} `{name}`: {err}"))
 }
 
 fn take<'a>(tokens: &mut Peekable<Tokens<'a>>, kind: TokenKind) -> Option<Lexeme<'a>> {

@@ -1561,3 +1561,604 @@ fn runtime_names_shadowed_in_extracted_vars_keep_load_time_resolution() {
     assert_eq!(merged.config, baseline.config);
     assert_eq!(merged.config["app"]["value"].as_str(), Some("LOAD"));
 }
+
+#[test]
+fn embedded_string_source_loads_and_merges_with_file_override() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    let dir = TempDir::new().unwrap();
+    let user_cfg = write(
+        &dir,
+        "config.toml",
+        r#"
+[vars]
+greeting = "hi"
+
+[app]
+banner = "{{ vars.greeting }} from {{ vars.origin }}"
+tags = ["user"]
+"#,
+    );
+
+    let embedded = ConfigSource::string(
+        "<embedded defaults>",
+        r#"
+[vars]
+greeting = "hello"
+origin = "defaults"
+
+[app]
+banner = "{{ vars.greeting }} from {{ vars.origin }}"
+timeout_ms = 5000
+tags = ["default"]
+"#,
+    );
+
+    let mut engine = Engine::new();
+    let merged = load_merged_sources(
+        [embedded, ConfigSource::path(&user_cfg)],
+        &mut engine,
+        &Context::new(),
+    )
+    .unwrap();
+
+    assert_eq!(merged.vars["greeting"].as_str(), Some("hi"));
+    assert_eq!(merged.vars["origin"].as_str(), Some("defaults"));
+    assert_eq!(
+        merged.config["app"]["banner"].as_str(),
+        Some("hi from defaults")
+    );
+    assert_eq!(merged.config["app"]["timeout_ms"].as_integer(), Some(5000));
+    let tags: Vec<_> = merged.config["app"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(tags, vec!["default", "user"]);
+}
+
+#[test]
+fn string_source_relative_nested_includes_and_rendered_root() {
+    use teravars::{ConfigSource, SourceId, load_merged_rendered};
+
+    let dir = TempDir::new().unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+
+    let leaf = sub.join("leaf.toml");
+    fs::write(
+        &leaf,
+        r#"
+[vars]
+host = "leaf.example"
+port = 8080
+
+[server]
+owner = "leaf"
+"#,
+    )
+    .unwrap();
+
+    let mid = sub.join("mid.toml");
+    fs::write(
+        &mid,
+        r#"
+include = ["leaf.toml"]
+
+[vars]
+base_url = "https://{{ vars.host }}:{{ vars.port }}"
+
+[server]
+owner = "mid"
+"#,
+    )
+    .unwrap();
+
+    let embedded = ConfigSource::string_with_base_dir(
+        "embedded.toml",
+        r#"
+# comment with {{ vars.not_defined }}
+include = ["sub/mid.toml"]
+
+[server]
+url = "{{ vars.base_url }}/api"
+owner = "root"
+"#,
+        dir.path(),
+    );
+
+    let mut engine = Engine::new();
+    let rendered = load_merged_rendered([embedded], &mut engine, &Context::new()).unwrap();
+
+    assert_eq!(rendered.sources.len(), 3);
+    assert_eq!(rendered.sources[0].id, SourceId::Path(leaf));
+    assert!(!rendered.sources[0].is_root);
+    assert_eq!(rendered.sources[1].id, SourceId::Path(mid));
+    assert!(!rendered.sources[1].is_root);
+    assert_eq!(
+        rendered.sources[2].id,
+        SourceId::Name("embedded.toml".into())
+    );
+    assert!(rendered.sources[2].is_root);
+
+    let root_text = rendered.rendered_root().expect("single root");
+    assert!(root_text.contains(r#"url = "https://leaf.example:8080/api""#));
+    assert!(root_text.contains(r#"include = ["sub/mid.toml"]"#));
+    assert!(!root_text.contains("vars.not_defined"));
+
+    assert_eq!(
+        rendered.merged.config["server"]["owner"].as_str(),
+        Some("root"),
+        "declaring string source should override included files"
+    );
+    assert_eq!(
+        rendered.merged.config["server"]["url"].as_str(),
+        Some("https://leaf.example:8080/api")
+    );
+    assert!(rendered.merged.config.get("include").is_none());
+}
+
+#[test]
+fn string_source_allows_absolute_include_without_base_dir() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    let dir = TempDir::new().unwrap();
+    let abs = write(&dir, "abs.toml", "[vars]\nfrom_abs = \"yes\"\n");
+    let abs_str = abs.to_string_lossy().replace('\\', "/");
+
+    let embedded = ConfigSource::string(
+        "embedded.toml",
+        format!("include = [\"{abs_str}\"]\n[app]\nval = \"{{{{ vars.from_abs }}}}\"\n"),
+    );
+
+    let merged = load_merged_sources([embedded], &mut Engine::new(), &Context::new()).unwrap();
+    assert_eq!(merged.config["app"]["val"].as_str(), Some("yes"));
+}
+
+#[test]
+fn string_source_rejects_relative_include_without_base_dir_and_invalid_base_dir() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    // Relative include with base_dir = None must fail with a named error
+    // rather than silently resolving against CWD.
+    let err = load_merged_sources(
+        [ConfigSource::string(
+            "embedded.toml",
+            "include = [\"Cargo.toml\"]\n",
+        )],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(matches!(err, Error::Extract(_)), "{err}");
+    assert!(msg.contains("embedded.toml"), "{msg}");
+    assert!(msg.contains("Cargo.toml"), "{msg}");
+    assert!(msg.contains("base_dir"), "{msg}");
+
+    // Empty and relative base_dir must be rejected with a named error.
+    for bad_base in ["", "relative/dir", "."] {
+        let err = load_merged_sources(
+            [ConfigSource::string_with_base_dir(
+                "embedded.toml",
+                "x = 1\n",
+                std::path::Path::new(bad_base),
+            )],
+            &mut Engine::new(),
+            &Context::new(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Extract(_)), "{bad_base}: {err}");
+        assert!(msg.contains("embedded.toml"), "{bad_base}: {msg}");
+        assert!(msg.contains("base_dir"), "{bad_base}: {msg}");
+    }
+
+    // Empty / whitespace-only source name must be rejected.
+    for bad_name in ["", "   "] {
+        let err = load_merged_sources(
+            [ConfigSource::string(bad_name, "x = 1\n")],
+            &mut Engine::new(),
+            &Context::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Extract(_)), "{bad_name:?}: {err}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn string_source_rejects_drive_relative_include() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    let err = load_merged_sources(
+        [ConfigSource::string_with_base_dir(
+            "embedded.toml",
+            "include = [\"D:foo.toml\"]\n",
+            std::path::Path::new("C:/configs"),
+        )],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(matches!(err, Error::Extract(_)), "{msg}");
+    assert!(msg.contains("embedded.toml"), "{msg}");
+    assert!(msg.contains("D:foo.toml"), "{msg}");
+    assert!(msg.contains("base_dir"), "{msg}");
+}
+
+#[test]
+fn string_source_named_diagnostics_and_ownership_protection() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    // Undefined variable render error includes source name and line number.
+    let err = load_merged_sources(
+        [ConfigSource::string(
+            "defaults.toml",
+            "\n# comment\n[app]\nval = \"{{ vars.missing }}\"\n",
+        )],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("defaults.toml"), "{msg}");
+    assert!(msg.contains(":4:"), "{msg}");
+
+    // Invalid [vars] TOML includes source name.
+    let err = load_merged_sources(
+        [ConfigSource::string("broken-vars.toml", "[vars]\na = [\n")],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("broken-vars.toml"), "{err}");
+
+    // Conflicting include forms return IncludeConflict naming the string source.
+    let err = load_merged_sources(
+        [ConfigSource::string(
+            "conflict.toml",
+            "include = []\n[teravars]\ninclude = []\n",
+        )],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::IncludeConflict { path } if path == std::path::Path::new("conflict.toml")),
+        "{err:?}"
+    );
+
+    // Ambiguous include ownership protection applies identically to string sources.
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+    let err = load_merged_sources(
+        [ConfigSource::string(
+            "ambiguous.toml",
+            "{% if show_app %}\n[app]\n{% endif %}\ninclude = [\"missing.toml\"]\n",
+        )],
+        &mut Engine::new(),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("ambiguous.toml `include`")
+                && message.contains("owning table depends on Tera rendering")),
+        "{err}"
+    );
+}
+
+#[test]
+fn duplicate_detection_separates_file_and_string_namespaces() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    // Duplicate string source names are rejected.
+    let err = load_merged_sources(
+        [
+            ConfigSource::string("defaults.toml", "a = 1\n"),
+            ConfigSource::string("defaults.toml", "b = 2\n"),
+        ],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::IncludeCycle { path } if path == std::path::Path::new("defaults.toml")),
+        "{err:?}"
+    );
+
+    // A string source whose name happens to equal an on-disk path string does
+    // not collide with loading that file, because string names and canonical
+    // file paths occupy separate namespaces.
+    let dir = TempDir::new().unwrap();
+    let file_path = write(&dir, "config.toml", "from_file = true\n");
+    let merged = load_merged_sources(
+        [
+            ConfigSource::string(
+                file_path.to_string_lossy().into_owned(),
+                "from_str = true\n",
+            ),
+            ConfigSource::path(&file_path),
+        ],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap();
+    assert_eq!(merged.config["from_str"].as_bool(), Some(true));
+    assert_eq!(merged.config["from_file"].as_bool(), Some(true));
+}
+
+#[test]
+fn rendered_root_direct_deserialization_preserves_line_and_column_diagnostics() {
+    use serde::Deserialize;
+    use teravars::{ConfigSource, load_merged_rendered};
+
+    #[derive(Debug, Deserialize)]
+    struct AppConfig {
+        server: Server,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Server {
+        #[allow(dead_code)]
+        host: String,
+        #[allow(dead_code)]
+        port: u16,
+    }
+
+    // Valid single-root config deserializes directly from rendered_root().
+    let good = ConfigSource::string(
+        "app.toml",
+        r#"# header comment
+[vars]
+host = "localhost"
+
+[server]
+host = "{{ vars.host }}"
+port = 8080
+"#,
+    );
+    let rendered = load_merged_rendered([good], &mut Engine::new(), &Context::new()).unwrap();
+    let root_text = rendered.rendered_root().unwrap();
+    let cfg: AppConfig = toml::from_str(root_text).unwrap();
+    assert_eq!(cfg.server.host, "localhost");
+    assert_eq!(cfg.server.port, 8080);
+
+    // Mistyped field on line 7 keeps exact line/column diagnostics in toml::from_str.
+    let bad = ConfigSource::string(
+        "app.toml",
+        "# line 1\n[vars]\nhost = \"localhost\"\n\n[server]\nhost = \"{{ vars.host }}\"\nport = \"not-a-port\"\n",
+    );
+    let rendered = load_merged_rendered([bad], &mut Engine::new(), &Context::new()).unwrap();
+    let root_text = rendered.rendered_root().unwrap();
+    let err = toml::from_str::<AppConfig>(root_text).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("line 7"), "expected line 7 diagnostic: {msg}");
+    assert!(err.span().is_some(), "expected span in error: {msg}");
+
+    // Multi-root load yields None for single-root accessors and exposes all roots via roots().
+    let multi = load_merged_rendered(
+        [
+            ConfigSource::string("base.toml", "a = 1\n"),
+            ConfigSource::string("override.toml", "b = 2\n"),
+        ],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap();
+    assert!(multi.root().is_none());
+    assert!(multi.rendered_root().is_none());
+    assert_eq!(multi.roots().count(), 2);
+}
+
+#[test]
+fn rendered_text_does_not_rerender_and_matches_path_api() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use teravars::{
+        ConfigSource, Kwargs, SourceId, State, TeraResult, Value, load_merged_rendered,
+    };
+
+    let dir = TempDir::new().unwrap();
+    let base = write(
+        &dir,
+        "base.toml",
+        "[vars]\nval = \"from-base\"\n[base]\ntick = \"{{ tick() }}\"\n",
+    );
+    let main = write(
+        &dir,
+        "config.toml",
+        "include = [\"base.toml\"]\n[vars]\nval = \"from-main\"\n[main]\ntick = \"{{ tick() }}\"\nseen = \"{{ vars.val }}\"\n",
+    );
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_fn = Arc::clone(&counter);
+    let mut engine = Engine::new();
+    engine.register_function(
+        "tick",
+        move |_kwargs: Kwargs, _state: &State| -> TeraResult<Value> {
+            let n = counter_fn.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Value::from(format!("call-{n}")))
+        },
+    );
+
+    let rendered =
+        load_merged_rendered([ConfigSource::path(&main)], &mut engine, &Context::new()).unwrap();
+
+    // Exactly two calls total (one for base.toml, one for config.toml) — proving
+    // no second render happens to produce rendered text.
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    assert_eq!(rendered.sources.len(), 2);
+    assert_eq!(rendered.sources[0].id, SourceId::Path(base));
+    assert!(!rendered.sources[0].is_root);
+    assert_eq!(rendered.sources[1].id, SourceId::Path(main.clone()));
+    assert!(rendered.sources[1].is_root);
+    assert!(rendered.sources[0].rendered.contains(r#"tick = "call-1""#));
+    assert!(
+        rendered.sources[0]
+            .rendered
+            .contains(r#"val = "from-base""#)
+    );
+    assert!(rendered.sources[1].rendered.contains(r#"tick = "call-2""#));
+    assert!(
+        rendered.sources[1]
+            .rendered
+            .contains(r#"seen = "from-main""#)
+    );
+    // Earlier source's rendered text is not retroactively rewritten by later overrides.
+    assert!(!rendered.sources[0].rendered.contains("from-main"));
+
+    // Existing path API produces the exact same merged tables (modulo tick counter).
+    let mut baseline_engine = Engine::new();
+    let baseline_counter = Arc::new(AtomicUsize::new(0));
+    let baseline_fn = Arc::clone(&baseline_counter);
+    baseline_engine.register_function(
+        "tick",
+        move |_kwargs: Kwargs, _state: &State| -> TeraResult<Value> {
+            let n = baseline_fn.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Value::from(format!("call-{n}")))
+        },
+    );
+    let baseline = load_merged([&main], &mut baseline_engine, &Context::new()).unwrap();
+    assert_eq!(rendered.merged.vars, baseline.vars);
+    assert_eq!(rendered.merged.config, baseline.config);
+
+    // Path iterators from discover_config_files work directly with load_merged_rendered.
+    let discovered = discover_config_files(dir.path()).unwrap();
+    let mut disc_engine = Engine::new();
+    disc_engine.register_function(
+        "tick",
+        |_kwargs: Kwargs, _state: &State| -> TeraResult<Value> { Ok(Value::from("ok")) },
+    );
+    let disc_rendered =
+        load_merged_rendered(discovered.iter(), &mut disc_engine, &Context::new()).unwrap();
+    assert_eq!(disc_rendered.sources.len(), 2);
+    assert!(disc_rendered.rendered_root().is_some());
+}
+
+#[test]
+fn rendered_output_interoperates_with_deferred_runtime_expressions() {
+    use teravars::{ConfigSource, LoadOptions, load_merged_rendered_with};
+
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "base.toml",
+        r#"
+[vars]
+prefix = "run"
+runtime = '{{ group }}'
+quoted_runtime = "{{ file_path | replace(from='\\', to='/') }}"
+alias = '{{ vars.runtime }}'
+"#,
+    );
+
+    let root_content = concat!(
+        "include = [\"base.toml\"]\n",
+        "[commands]\n",
+        "direct_basic = \"{{ vars.prefix }} {{ cap[0] | replace(from=\"a\", to=\"#\") }}\"\n",
+        "direct_literal = '{{ vars.prefix }} {{ group }}'\n",
+        "from_var_basic = \"{{ vars.alias }}\"\n",
+        "from_var_single_quote_in_literal = '{{ vars.quoted_runtime }}'\n",
+        "mixed_emitted_and_var = \"{{ group }} :: {{ vars.alias }}\"\n",
+        "ml_literal = '''\n",
+        "first {{ vars.prefix }}\n",
+        "second {{ group }}\n",
+        "'''\n",
+        "ml_switch = '''\n",
+        "{{ vars.quoted_runtime }}\n",
+        "'''\n",
+        "after = \"line-check\"\n",
+    );
+
+    let options = LoadOptions::new()
+        .defer("group")
+        .defer("file_path")
+        .defer("cap");
+
+    let mut engine = Engine::new();
+    let rendered = load_merged_rendered_with(
+        [ConfigSource::string_with_base_dir(
+            "root.toml",
+            root_content,
+            dir.path(),
+        )],
+        &mut engine,
+        &Context::new(),
+        &options,
+    )
+    .unwrap();
+
+    // No internal deferred marker characters may leak into any rendered source.
+    for source in &rendered.sources {
+        assert!(
+            !source
+                .rendered
+                .chars()
+                .any(|c| matches!(c, '\u{e000}' | '\u{e001}' | '\u{e002}')),
+            "marker leaked in {}: {:?}",
+            source.id,
+            source.rendered
+        );
+    }
+
+    let root_text = rendered.rendered_root().unwrap();
+    // Line count must stay identical to the original source.
+    assert_eq!(
+        root_text.lines().count(),
+        root_content.lines().count(),
+        "line structure changed:\n{root_text}"
+    );
+
+    // Restored rendered text must be valid TOML and decode to the exact same
+    // string values as the merged table.
+    let reparsed: toml::Table = toml::from_str(root_text)
+        .unwrap_or_else(|e| panic!("restored rendered text is invalid TOML: {e}\n{root_text}"));
+    let reparsed_cmds = reparsed["commands"].as_table().unwrap();
+    let merged_cmds = rendered.merged.config["commands"].as_table().unwrap();
+    assert_eq!(reparsed_cmds, merged_cmds);
+
+    // Verify second render works directly on values parsed from rendered_root().
+    let mut rt_ctx = Context::new();
+    rt_ctx.insert("vars", &rendered.merged.vars);
+    rt_ctx.insert("group", &"dev");
+    rt_ctx.insert("file_path", &r"C:\a\b.txt");
+    rt_ctx.insert("cap", &["alpha"]);
+
+    assert_eq!(
+        engine
+            .render(reparsed_cmds["direct_basic"].as_str().unwrap(), &rt_ctx)
+            .unwrap(),
+        "run #lph#"
+    );
+    assert_eq!(
+        engine
+            .render(
+                reparsed_cmds["from_var_single_quote_in_literal"]
+                    .as_str()
+                    .unwrap(),
+                &rt_ctx
+            )
+            .unwrap(),
+        "C:/a/b.txt"
+    );
+    assert_eq!(
+        engine
+            .render(
+                reparsed_cmds["mixed_emitted_and_var"].as_str().unwrap(),
+                &rt_ctx
+            )
+            .unwrap(),
+        "dev :: dev"
+    );
+    assert_eq!(
+        engine
+            .render(reparsed_cmds["ml_literal"].as_str().unwrap(), &rt_ctx)
+            .unwrap(),
+        "first run\nsecond dev\n"
+    );
+}
