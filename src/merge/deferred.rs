@@ -1,10 +1,15 @@
 use std::collections::{HashSet, hash_map::RandomState};
+use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize;
+use toml::de::ValueDeserializer;
 use toml::{Table, Value};
+use toml_parser::Source as TomlSource;
+use toml_parser::lexer::TokenKind;
 
+use super::SourceId;
 use crate::comments::tera_tag_end;
 use crate::{Error, Result};
 
@@ -69,7 +74,7 @@ pub(super) struct Deferred<'a> {
 
 pub(super) struct Emissions {
     counts: Arc<Mutex<Vec<usize>>>,
-    prefix: String,
+    pub(super) prefix: String,
 }
 
 impl Emissions {
@@ -235,14 +240,14 @@ impl<'a> Deferred<'a> {
 
     // Keep markers opaque through both vars resolution passes. The original
     // tags are only restored into parsed string values after the final pass.
-    pub(super) fn protect(&mut self, text: &str, path: &Path, allow: bool) -> Result<String> {
-        self.protect_impl(text, path, allow, true, None, true)
+    pub(super) fn protect(&mut self, text: &str, source: &SourceId, allow: bool) -> Result<String> {
+        self.protect_impl(text, source, allow, true, None, true)
     }
 
     fn protect_impl(
         &mut self,
         text: &str,
-        path: &Path,
+        source: &SourceId,
         allow: bool,
         document: bool,
         ctx: Option<&tera::Context>,
@@ -253,8 +258,7 @@ impl<'a> Deferred<'a> {
         }
         if document && ctx.is_none() && text.contains(&self.prefix) {
             return Err(Error::Render(format!(
-                "{}: deferred marker collision",
-                path.display()
+                "{source}: deferred marker collision"
             )));
         }
         let mut out = String::with_capacity(text.len());
@@ -362,8 +366,7 @@ impl<'a> Deferred<'a> {
                     .find(|n| self.options.matches(n) && !bound(n) && possible(n))
                 {
                     return Err(Error::Render(format!(
-                        "{}: runtime variable `{name}` has an ambiguous load-time binding",
-                        path.display()
+                        "{source}: runtime variable `{name}` has an ambiguous load-time binding"
                     )));
                 }
                 if let Some(name) = refs
@@ -372,16 +375,13 @@ impl<'a> Deferred<'a> {
                 {
                     let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
                     let fail = |why| {
-                        Error::Render(format!(
-                            "{}:{line}: runtime variable `{name}` {why}",
-                            path.display()
-                        ))
+                        Error::Render(format!("{source}:{line}: runtime variable `{name}` {why}"))
                     };
                     if kind == '{'
                         && let Err(err) = &parsed
                         && matches!(err.kind(), tera::ErrorKind::SyntaxError(_))
                     {
-                        return Err(Error::Render(format!("{}:{line}: {err}", path.display())));
+                        return Err(Error::Render(format!("{source}:{line}: {err}")));
                     }
                     if kind != '{' || !allow {
                         return Err(fail("is not supported in this context"));
@@ -427,8 +427,7 @@ impl<'a> Deferred<'a> {
                     ) {
                         let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
                         return Err(Error::Render(format!(
-                            "{}:{line}: runtime variable value may only be copied directly into a string; defer the original expression instead",
-                            path.display()
+                            "{source}:{line}: runtime variable value may only be copied directly into a string; defer the original expression instead"
                         )));
                     }
                 }
@@ -497,7 +496,7 @@ impl<'a> Deferred<'a> {
         vars: &mut Table,
         engine: &mut crate::Engine,
         ctx: &tera::Context,
-        path: &Path,
+        source: &SourceId,
         best_effort: bool,
     ) -> Result<()> {
         if !self.active() {
@@ -521,7 +520,7 @@ impl<'a> Deferred<'a> {
                 let protected = self
                     .protect_impl(
                         text,
-                        path,
+                        source,
                         true,
                         false,
                         Some(ctx),
@@ -541,11 +540,11 @@ impl<'a> Deferred<'a> {
     pub(super) fn validate_indirect(
         &mut self,
         text: &str,
-        path: &Path,
+        source: &SourceId,
         ctx: &tera::Context,
     ) -> Result<()> {
         if self.active() {
-            self.protect_impl(text, path, true, true, Some(ctx), true)?;
+            self.protect_impl(text, source, true, true, Some(ctx), true)?;
         }
         Ok(())
     }
@@ -601,35 +600,34 @@ impl<'a> Deferred<'a> {
         Ok((output, Some(Emissions { counts, prefix })))
     }
 
-    pub(super) fn normalize(&self, table: &mut Table, emissions: Option<Emissions>) -> Result<()> {
+    pub(super) fn normalize(&self, table: &mut Table, emissions: Option<&Emissions>) -> Result<()> {
         if let Some(emissions) = emissions {
             emissions.normalize(table, &self.prefix)?;
         }
         Ok(())
     }
 
-    pub(super) fn check_keys(&self, table: &Table, path: &Path) -> Result<()> {
+    pub(super) fn check_keys(&self, table: &Table, source: &SourceId) -> Result<()> {
         if !self.active() {
             return Ok(());
         }
         for (key, value) in table {
             if key.contains(&self.prefix) {
                 return Err(Error::Render(format!(
-                    "{}: runtime variables are not supported in TOML keys or headers",
-                    path.display()
+                    "{source}: runtime variables are not supported in TOML keys or headers"
                 )));
             }
-            self.check_value(value, path)?;
+            self.check_value(value, source)?;
         }
         Ok(())
     }
 
-    fn check_value(&self, value: &Value, path: &Path) -> Result<()> {
+    fn check_value(&self, value: &Value, source: &SourceId) -> Result<()> {
         match value {
-            Value::Table(t) => self.check_keys(t, path),
+            Value::Table(t) => self.check_keys(t, source),
             Value::Array(a) => {
                 for v in a {
-                    self.check_value(v, path)?;
+                    self.check_value(v, source)?;
                 }
                 Ok(())
             }
@@ -653,23 +651,7 @@ impl<'a> Deferred<'a> {
                 if !s.contains(&self.prefix) {
                     return Ok(());
                 }
-                let mut out = String::new();
-                let mut rest = s.as_str();
-                while let Some(i) = rest.find(&self.prefix) {
-                    out.push_str(&rest[..i]);
-                    rest = &rest[i + self.prefix.len()..];
-                    let Some((index, tail)) = rest.split_once(MARKER_END) else {
-                        return Err(Error::Render("corrupted deferred marker".into()));
-                    };
-                    let Some(tag) = index.parse::<usize>().ok().and_then(|i| self.tags.get(i))
-                    else {
-                        return Err(Error::Render("unknown deferred marker".into()));
-                    };
-                    out.push_str(tag);
-                    rest = tail;
-                }
-                out.push_str(rest);
-                *s = out;
+                *s = self.restore_markers(s, None)?;
             }
             Value::Table(t) => self.restore(t)?,
             Value::Array(a) => {
@@ -681,6 +663,240 @@ impl<'a> Deferred<'a> {
         }
         Ok(())
     }
+
+    /// Restore both persistent and emitted deferred markers inside string value
+    /// tokens of a validated rendered TOML document, preserving valid TOML and
+    /// line structure.
+    pub(super) fn restore_rendered(
+        &self,
+        rendered: String,
+        emitted_prefix: Option<&str>,
+    ) -> Result<String> {
+        if !self.active() {
+            return Ok(rendered);
+        }
+        let has_persistent = !self.prefix.is_empty() && rendered.contains(&self.prefix);
+        let has_emitted = emitted_prefix.is_some_and(|p| rendered.contains(p));
+        if !has_persistent && !has_emitted {
+            return Ok(rendered);
+        }
+
+        let mut out = String::with_capacity(rendered.len());
+        let mut last_pos = 0;
+
+        for token in TomlSource::new(&rendered).lex() {
+            let kind = token.kind();
+            if !matches!(
+                kind,
+                TokenKind::BasicString
+                    | TokenKind::LiteralString
+                    | TokenKind::MlBasicString
+                    | TokenKind::MlLiteralString
+            ) {
+                continue;
+            }
+            let start = token.span().start();
+            let end = token.span().end();
+            let raw_token = &rendered[start..end];
+            let token_has_persistent = has_persistent && raw_token.contains(&self.prefix);
+            let token_has_emitted = emitted_prefix.is_some_and(|p| raw_token.contains(p));
+            if !token_has_persistent && !token_has_emitted {
+                continue;
+            }
+
+            let decoded = ValueDeserializer::parse(raw_token)
+                .and_then(String::deserialize)
+                .map_err(|e| Error::Render(format!("failed to decode rendered string: {e}")))?;
+            let restored = self.restore_markers(&decoded, emitted_prefix)?;
+            let orig_newlines = raw_token.bytes().filter(|&b| b == b'\n').count();
+            let reencoded = encode_toml_string(kind, raw_token, &restored, orig_newlines);
+
+            out.push_str(&rendered[last_pos..start]);
+            out.push_str(&reencoded);
+            last_pos = end;
+        }
+
+        out.push_str(&rendered[last_pos..]);
+        Ok(out)
+    }
+
+    fn restore_markers(&self, input: &str, emitted_prefix: Option<&str>) -> Result<String> {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        while !rest.is_empty() {
+            let persistent_pos = (!self.prefix.is_empty())
+                .then(|| rest.find(&self.prefix).map(|i| (i, self.prefix.len())))
+                .flatten();
+            let emitted_pos = emitted_prefix.and_then(|p| rest.find(p).map(|i| (i, p.len())));
+            let next = match (persistent_pos, emitted_pos) {
+                (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let Some((pos, prefix_len)) = next else {
+                out.push_str(rest);
+                break;
+            };
+            out.push_str(&rest[..pos]);
+            rest = &rest[pos + prefix_len..];
+            let Some((index, tail)) = rest.split_once(MARKER_END) else {
+                return Err(Error::Render("corrupted deferred marker".into()));
+            };
+            let Some(tag) = index.parse::<usize>().ok().and_then(|i| self.tags.get(i)) else {
+                return Err(Error::Render("unknown deferred marker".into()));
+            };
+            out.push_str(tag);
+            rest = tail;
+        }
+        Ok(out)
+    }
+}
+
+fn encode_toml_string(
+    kind: TokenKind,
+    raw_token: &str,
+    value: &str,
+    orig_newlines: usize,
+) -> String {
+    match kind {
+        TokenKind::LiteralString => {
+            if can_be_literal_string(value) {
+                format!("'{value}'")
+            } else {
+                encode_basic_string(value)
+            }
+        }
+        TokenKind::BasicString => encode_basic_string(value),
+        TokenKind::MlLiteralString => {
+            let had_leading_newline =
+                raw_token.starts_with("'''\n") || raw_token.starts_with("'''\r\n");
+            if let Some(encoded) =
+                try_encode_ml_literal_string(value, orig_newlines, had_leading_newline)
+            {
+                encoded
+            } else {
+                encode_ml_basic_string(value, orig_newlines, had_leading_newline)
+            }
+        }
+        TokenKind::MlBasicString => {
+            let had_leading_newline =
+                raw_token.starts_with("\"\"\"\n") || raw_token.starts_with("\"\"\"\r\n");
+            encode_ml_basic_string(value, orig_newlines, had_leading_newline)
+        }
+        _ => encode_basic_string(value),
+    }
+}
+
+fn can_be_literal_string(s: &str) -> bool {
+    s.chars()
+        .all(|c| c == '\t' || (c >= ' ' && c != '\'' && c != '\u{7F}'))
+}
+
+fn encode_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{007F}' => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn try_encode_ml_literal_string(
+    value: &str,
+    target_newlines: usize,
+    had_leading_newline: bool,
+) -> Option<String> {
+    if value.contains("'''")
+        || value.ends_with('\'')
+        || !value
+            .chars()
+            .all(|c| c == '\t' || c == '\n' || (c >= ' ' && c != '\u{7F}'))
+    {
+        return None;
+    }
+    let value_newlines = value.bytes().filter(|&b| b == b'\n').count();
+    if had_leading_newline && 1 + value_newlines == target_newlines {
+        Some(format!("'''\n{value}'''"))
+    } else if !had_leading_newline && !value.starts_with('\n') && value_newlines == target_newlines
+    {
+        Some(format!("'''{value}'''"))
+    } else {
+        None
+    }
+}
+
+fn encode_ml_basic_string(
+    value: &str,
+    target_newlines: usize,
+    prefer_leading_newline: bool,
+) -> String {
+    let mut out = String::with_capacity(value.len() + 6);
+    out.push_str("\"\"\"");
+    let mut emitted_newlines = 0usize;
+    if prefer_leading_newline && target_newlines > 0 {
+        out.push('\n');
+        emitted_newlines += 1;
+    }
+
+    let mut consecutive_quotes = 0usize;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        let is_last = chars.peek().is_none();
+        if c != '"' {
+            consecutive_quotes = 0;
+        }
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => {
+                if consecutive_quotes >= 2 || is_last {
+                    out.push_str("\\\"");
+                    consecutive_quotes = 0;
+                } else {
+                    out.push('"');
+                    consecutive_quotes += 1;
+                }
+            }
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push('\t'),
+            '\n' => {
+                if emitted_newlines < target_newlines && out.len() > 3 {
+                    out.push('\n');
+                    emitted_newlines += 1;
+                } else {
+                    out.push_str("\\n");
+                }
+            }
+            '\u{000C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{007F}' => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+
+    if emitted_newlines < target_newlines {
+        out.push('\\');
+        for _ in emitted_newlines..target_newlines {
+            out.push('\n');
+        }
+    }
+    out.push_str("\"\"\"");
+    out
 }
 
 fn ident(s: &str) -> bool {
@@ -953,4 +1169,66 @@ fn indirect_use(
 fn expression_body(body: &str) -> &str {
     let body = body.strip_prefix('-').unwrap_or(body);
     body.strip_suffix('-').unwrap_or(body).trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_toml_string_round_trips_and_preserves_newlines() {
+        let values = [
+            "",
+            "plain",
+            r##"{{ cap[0] | replace(from="a", to="#") }}"##,
+            r#"{{ file_path | replace(from='\\', to='/') }}"#,
+            "has 'single' and \"double\" quotes",
+            "has \"\"\"triple\"\"\" and '''triple'''",
+            "\"\"\"starts with triple",
+            "\"\"starts with two",
+            "\"starts with one",
+            "\"\"\"",
+            "\"\"",
+            "\"",
+            "ends with quote\"",
+            "ends with two\"\"",
+            "ends with backslash\\",
+            "\nleading newline",
+            "trailing newline\n",
+            "line1\nline2\nline3",
+            "cr\r\nlf\rand\ttab\x07bell",
+            "   spaces   ",
+        ];
+
+        for value in values {
+            for (kind, raw_token, newlines) in [
+                (TokenKind::BasicString, r#""x""#, 0),
+                (TokenKind::LiteralString, "'x'", 0),
+                (TokenKind::MlBasicString, "\"\"\"x\"\"\"", 0),
+                (TokenKind::MlBasicString, "\"\"\"\nx\n\"\"\"", 2),
+                (TokenKind::MlBasicString, "\"\"\"\na\nb\nc\n\"\"\"", 4),
+                (TokenKind::MlLiteralString, "'''x'''", 0),
+                (TokenKind::MlLiteralString, "'''\nx\n'''", 2),
+                (TokenKind::MlLiteralString, "'''\na\nb\nc\n'''", 4),
+            ] {
+                let encoded = encode_toml_string(kind, raw_token, value, newlines);
+                assert_eq!(
+                    encoded.bytes().filter(|&b| b == b'\n').count(),
+                    newlines,
+                    "newline count mismatch for kind={kind:?} value={value:?} encoded={encoded:?}"
+                );
+                let doc = format!("k = {encoded}\n");
+                let parsed: Table = toml::from_str(&doc).unwrap_or_else(|e| {
+                    panic!(
+                        "invalid TOML for kind={kind:?} value={value:?} encoded={encoded:?}: {e}"
+                    )
+                });
+                assert_eq!(
+                    parsed["k"].as_str(),
+                    Some(value),
+                    "decoded mismatch for kind={kind:?} value={value:?} encoded={encoded:?}"
+                );
+            }
+        }
+    }
 }

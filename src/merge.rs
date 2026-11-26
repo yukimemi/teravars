@@ -5,7 +5,9 @@
 mod deferred;
 mod include;
 
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use tera::Context;
@@ -20,10 +22,223 @@ use deferred::Deferred;
 pub use deferred::LoadOptions;
 use include::extract_include_paths;
 
+/// Identifies a loaded configuration source in diagnostics and
+/// [`RenderedSource`] entries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SourceId {
+    /// A configuration file loaded from the filesystem.
+    Path(PathBuf),
+    /// An in-memory string configuration source identified by name.
+    Name(String),
+}
+
+impl SourceId {
+    /// Return the filesystem path if this source was loaded from disk.
+    pub fn as_path(&self) -> Option<&Path> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Name(_) => None,
+        }
+    }
+
+    /// Return the logical name if this source was loaded from a string.
+    pub fn as_name(&self) -> Option<&str> {
+        match self {
+            Self::Path(_) => None,
+            Self::Name(name) => Some(name),
+        }
+    }
+
+    pub(super) fn to_diagnostic_path(&self) -> PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            Self::Name(name) => PathBuf::from(name),
+        }
+    }
+}
+
+impl fmt::Display for SourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::Name(name) => f.write_str(name),
+        }
+    }
+}
+
+impl From<PathBuf> for SourceId {
+    fn from(path: PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl From<&Path> for SourceId {
+    fn from(path: &Path) -> Self {
+        Self::Path(path.to_path_buf())
+    }
+}
+
+impl From<&PathBuf> for SourceId {
+    fn from(path: &PathBuf) -> Self {
+        Self::Path(path.clone())
+    }
+}
+
+/// Configuration input for [`load_merged_sources`] and [`load_merged_rendered`].
+///
+/// Explicitly distinguishes filesystem paths from named in-memory strings so
+/// embedded defaults (e.g. `include_str!`) and on-disk config files can be
+/// combined through the same loader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Load a configuration file from the filesystem.
+    Path(PathBuf),
+    /// Load an in-memory TOML+Tera document identified by `name`.
+    ///
+    /// `name` is used only for diagnostics and duplicate detection and is never
+    /// treated as a filesystem path. Relative `include` paths require an
+    /// explicit absolute `base_dir`; absolute `include` paths work even when
+    /// `base_dir` is `None`.
+    String {
+        name: String,
+        content: String,
+        base_dir: Option<PathBuf>,
+    },
+}
+
+impl ConfigSource {
+    /// Construct a filesystem path source.
+    pub fn path(path: impl Into<PathBuf>) -> Self {
+        Self::Path(path.into())
+    }
+
+    /// Construct a named in-memory string source with no relative include base
+    /// directory.
+    ///
+    /// Absolute `include` paths are still allowed, while relative `include`
+    /// paths fail with a named error instead of silently resolving against the
+    /// process working directory.
+    pub fn string(name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::String {
+            name: name.into(),
+            content: content.into(),
+            base_dir: None,
+        }
+    }
+
+    /// Construct a named in-memory string source with an explicit absolute
+    /// `base_dir` for resolving relative `include` paths.
+    pub fn string_with_base_dir(
+        name: impl Into<String>,
+        content: impl Into<String>,
+        base_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self::String {
+            name: name.into(),
+            content: content.into(),
+            base_dir: Some(base_dir.into()),
+        }
+    }
+
+    fn as_input(&self) -> SourceInput<'_> {
+        match self {
+            Self::Path(path) => SourceInput::Path(path.as_path()),
+            Self::String {
+                name,
+                content,
+                base_dir,
+            } => SourceInput::String {
+                name: name.as_str(),
+                content: content.as_str(),
+                base_dir: base_dir.as_deref(),
+            },
+        }
+    }
+}
+
+impl From<PathBuf> for ConfigSource {
+    fn from(path: PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl From<&Path> for ConfigSource {
+    fn from(path: &Path) -> Self {
+        Self::Path(path.to_path_buf())
+    }
+}
+
+impl From<&PathBuf> for ConfigSource {
+    fn from(path: &PathBuf) -> Self {
+        Self::Path(path.clone())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
     pub vars: Table,
     pub config: Table,
+}
+
+/// Actual rendered TOML text produced for a single source during loading.
+///
+/// The text is captured directly from the single Tera render pass after
+/// validation — never re-rendered and never re-serialized from the merged
+/// table.
+///
+/// Contract details:
+/// - TOML `#` comments are already stripped (preserving line numbers).
+/// - Values reflect what was in scope when this source rendered (including
+///   vars from earlier sources and includes); later sources' overrides are not
+///   retroactively reflected.
+/// - Unlike [`MergedConfig::config`], any `include` or `[teravars]` directive
+///   present in the source remains in `rendered`.
+/// - When [`LoadOptions`] deferred runtime expressions are active, deferred
+///   tags are restored as valid TOML string literals while preserving line
+///   structure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedSource {
+    pub id: SourceId,
+    pub is_root: bool,
+    pub rendered: String,
+}
+
+/// Result of [`load_merged_rendered`] / [`load_merged_rendered_with`].
+///
+/// Contains the merged configuration tables together with each loaded source's
+/// rendered TOML text in load order (included files before their declaring
+/// source).
+#[derive(Debug, Clone, Default)]
+pub struct RenderedConfig {
+    pub merged: MergedConfig,
+    pub sources: Vec<RenderedSource>,
+}
+
+impl RenderedConfig {
+    /// Return the single root source if exactly one root was loaded.
+    ///
+    /// Returns `None` when zero or multiple root sources were passed.
+    pub fn root(&self) -> Option<&RenderedSource> {
+        let mut roots = self.roots();
+        let first = roots.next()?;
+        roots.next().is_none().then_some(first)
+    }
+
+    /// Return the actual rendered text of the single root source, if exactly
+    /// one root was loaded.
+    ///
+    /// When a single root has no `include` or `[teravars]` directives, this
+    /// text can be passed directly to `toml::from_str` for full line/column
+    /// deserialization diagnostics.
+    pub fn rendered_root(&self) -> Option<&str> {
+        self.root().map(|source| source.rendered.as_str())
+    }
+
+    /// Iterate over all root sources (excluding transitive includes) in load
+    /// order.
+    pub fn roots(&self) -> impl Iterator<Item = &RenderedSource> {
+        self.sources.iter().filter(|source| source.is_root)
+    }
 }
 
 pub fn load_merged<P: AsRef<Path>>(
@@ -48,31 +263,167 @@ pub fn load_merged_with<P: AsRef<Path>>(
     extra_ctx: &Context,
     options: &LoadOptions,
 ) -> Result<MergedConfig> {
+    load_merged_sources_with(
+        paths.into_iter().map(|p| ConfigSource::path(p.as_ref())),
+        engine,
+        extra_ctx,
+        options,
+    )
+}
+
+/// Load and merge configuration from any mix of filesystem paths and named
+/// in-memory strings.
+///
+/// Uses the exact same include-first, per-source Tera rendering and deep-merge
+/// pipeline as [`load_merged`].
+///
+/// # Example: embedded defaults (`include_str!`)
+///
+/// ```
+/// use teravars::{ConfigSource, Context, Engine, load_merged_sources};
+///
+/// const EMBEDDED_DEFAULTS: &str = r#"
+/// [vars]
+/// editor = "nvim"
+///
+/// [ui]
+/// command = "{{ vars.editor }}"
+/// "#;
+///
+/// let mut engine = Engine::new();
+/// let merged = load_merged_sources(
+///     [ConfigSource::string("<embedded defaults>", EMBEDDED_DEFAULTS)],
+///     &mut engine,
+///     &Context::new(),
+/// )
+/// .unwrap();
+///
+/// assert_eq!(merged.config["ui"]["command"].as_str(), Some("nvim"));
+/// ```
+pub fn load_merged_sources<S: Into<ConfigSource>>(
+    sources: impl IntoIterator<Item = S>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+) -> Result<MergedConfig> {
+    load_merged_sources_with(sources, engine, extra_ctx, &LoadOptions::default())
+}
+
+/// Like [`load_merged_sources`], with opt-in [`LoadOptions`] for preserving
+/// runtime-only Tera expressions.
+pub fn load_merged_sources_with<S: Into<ConfigSource>>(
+    sources: impl IntoIterator<Item = S>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    options: &LoadOptions,
+) -> Result<MergedConfig> {
+    load_internal(sources, engine, extra_ctx, options, None)
+}
+
+/// Like [`load_merged_sources`], additionally returning the actual rendered
+/// TOML text for each loaded source (and [`RenderedConfig::rendered_root`] for
+/// single-root loads) without re-rendering or re-serializing the merged table.
+///
+/// # Example: `config show --rendered` and direct deserialization
+///
+/// ```
+/// use teravars::{ConfigSource, Context, Engine, load_merged_rendered};
+///
+/// let mut engine = Engine::new();
+/// let rendered = load_merged_rendered(
+///     [ConfigSource::string(
+///         "defaults.toml",
+///         "[vars]\nport = 8080\n[server]\nport = {{ vars.port }}\n",
+///     )],
+///     &mut engine,
+///     &Context::new(),
+/// )
+/// .unwrap();
+///
+/// // Single root with no `include`: deserialize directly for line/column diagnostics.
+/// let root_text = rendered.rendered_root().unwrap();
+/// let parsed: toml::Table = toml::from_str(root_text).unwrap();
+/// assert_eq!(parsed["server"]["port"].as_integer(), Some(8080));
+///
+/// // Or inspect every rendered source in load order (e.g. `config show --rendered`).
+/// assert_eq!(rendered.sources.len(), 1);
+/// assert_eq!(rendered.sources[0].id.as_name(), Some("defaults.toml"));
+/// ```
+pub fn load_merged_rendered<S: Into<ConfigSource>>(
+    sources: impl IntoIterator<Item = S>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+) -> Result<RenderedConfig> {
+    load_merged_rendered_with(sources, engine, extra_ctx, &LoadOptions::default())
+}
+
+/// Like [`load_merged_rendered`], with opt-in [`LoadOptions`] for preserving
+/// runtime-only Tera expressions in both the merged tables and the returned
+/// rendered text.
+pub fn load_merged_rendered_with<S: Into<ConfigSource>>(
+    sources: impl IntoIterator<Item = S>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    options: &LoadOptions,
+) -> Result<RenderedConfig> {
+    let mut rendered_sources = Vec::new();
+    let merged = load_internal(
+        sources,
+        engine,
+        extra_ctx,
+        options,
+        Some(&mut rendered_sources),
+    )?;
+    Ok(RenderedConfig {
+        merged,
+        sources: rendered_sources,
+    })
+}
+
+enum SourceInput<'a> {
+    Path(&'a Path),
+    String {
+        name: &'a str,
+        content: &'a str,
+        base_dir: Option<&'a Path>,
+    },
+}
+
+#[derive(Default)]
+struct Visited {
+    paths: HashSet<PathBuf>,
+    names: HashSet<String>,
+}
+
+fn load_internal<S: Into<ConfigSource>>(
+    sources: impl IntoIterator<Item = S>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    options: &LoadOptions,
+    mut rendered_sources: Option<&mut Vec<RenderedSource>>,
+) -> Result<MergedConfig> {
     let mut deferred = Deferred::new(options, engine)?;
     let mut acc_vars = Table::new();
     let mut acc_config = Table::new();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut visited = Visited::default();
 
-    for p in paths {
-        load_file_recursive(
-            p.as_ref(),
+    for source in sources {
+        let source = source.into();
+        load_source_recursive(
+            source.as_input(),
+            true,
             engine,
             extra_ctx,
             &mut acc_vars,
             &mut acc_config,
             &mut visited,
             &mut deferred,
+            rendered_sources.as_deref_mut(),
         )?;
     }
 
     if !acc_vars.is_empty() {
-        deferred.resolve(
-            &mut acc_vars,
-            engine,
-            extra_ctx,
-            Path::new("<merged vars>"),
-            false,
-        )?;
+        let merged_vars_id = SourceId::Name("<merged vars>".into());
+        deferred.resolve(&mut acc_vars, engine, extra_ctx, &merged_vars_id, false)?;
     }
     deferred.restore(&mut acc_vars)?;
     deferred.restore(&mut acc_config)?;
@@ -83,84 +434,143 @@ pub fn load_merged_with<P: AsRef<Path>>(
     })
 }
 
-fn load_file_recursive(
-    path: &Path,
+#[allow(clippy::too_many_arguments)]
+fn load_source_recursive(
+    input: SourceInput<'_>,
+    is_root: bool,
     engine: &mut Engine,
     extra_ctx: &Context,
     acc_vars: &mut Table,
     acc_config: &mut Table,
-    visited: &mut HashSet<PathBuf>,
+    visited: &mut Visited,
     deferred: &mut Deferred<'_>,
+    mut rendered_sources: Option<&mut Vec<RenderedSource>>,
 ) -> Result<()> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !visited.insert(canonical.clone()) {
-        return Err(Error::IncludeCycle { path: canonical });
-    }
-
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        Error::Io(std::io::Error::new(
-            e.kind(),
-            format!("{}: {e}", path.display()),
-        ))
-    })?;
+    let (source_id, raw): (SourceId, Cow<'_, str>) = match input {
+        SourceInput::Path(path) => {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if !visited.paths.insert(canonical.clone()) {
+                return Err(Error::IncludeCycle { path: canonical });
+            }
+            let raw = std::fs::read_to_string(path).map_err(|e| {
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", path.display()),
+                ))
+            })?;
+            (SourceId::Path(path.to_path_buf()), Cow::Owned(raw))
+        }
+        SourceInput::String {
+            name,
+            content,
+            base_dir,
+        } => {
+            if name.trim().is_empty() {
+                return Err(Error::Extract(
+                    "string config source name must not be empty".into(),
+                ));
+            }
+            if let Some(dir) = base_dir {
+                if dir.as_os_str().is_empty() {
+                    return Err(Error::Extract(format!(
+                        "{name}: base_dir must be an absolute path"
+                    )));
+                }
+                if !dir.is_absolute() {
+                    return Err(Error::Extract(format!(
+                        "{name}: base_dir `{}` must be an absolute path",
+                        dir.display()
+                    )));
+                }
+            }
+            if !visited.names.insert(name.to_owned()) {
+                return Err(Error::IncludeCycle {
+                    path: PathBuf::from(name),
+                });
+            }
+            (SourceId::Name(name.to_owned()), Cow::Borrowed(content))
+        }
+    };
 
     // Comment text never reaches Tera: a commented-out sample line or a note
     // quoting teravars syntax would otherwise render (and typically fail the
     // whole load). Done once here so include detection, [vars] extraction
     // and the render below all see the same comment-free text; line numbers
-    // are preserved, so error locations still line up with the file on disk.
+    // are preserved, so error locations still line up with the source.
     let raw = strip_toml_comments(&raw);
 
-    let include_paths = extract_include_paths(&raw, path)?;
+    let include_paths = extract_include_paths(&raw, &source_id)?;
     for raw_inc in &include_paths.paths {
         if deferred.active() {
-            deferred.protect(raw_inc, path, false)?;
+            deferred.protect(raw_inc, &source_id, false)?;
         }
-        let rendered = engine
+        let rendered_inc = engine
             .render(raw_inc, extra_ctx)
-            .map_err(|e| Error::Render(format!("{} include: {}", path.display(), error_msg(&e))))?;
-        let inc_path = resolve_relative(path, Path::new(&rendered));
-        load_file_recursive(
-            &inc_path, engine, extra_ctx, acc_vars, acc_config, visited, deferred,
+            .map_err(|e| Error::Render(format!("{source_id} include: {}", error_msg(&e))))?;
+        let inc_path = resolve_include_path(&input, &source_id, &rendered_inc)?;
+        load_source_recursive(
+            SourceInput::Path(&inc_path),
+            false,
+            engine,
+            extra_ctx,
+            acc_vars,
+            acc_config,
+            visited,
+            deferred,
+            rendered_sources.as_deref_mut(),
         )?;
     }
 
     let protected;
     let raw = if deferred.active() {
-        protected = deferred.protect(&raw, path, true)?;
+        protected = deferred.protect(&raw, &source_id, true)?;
         protected.as_str()
     } else {
         raw.as_ref()
     };
-    let file_vars = extract_vars(raw)?;
+    let file_vars = extract_vars(raw).map_err(|e| match e {
+        Error::Extract(msg) => Error::Extract(format!("{source_id}: {msg}")),
+        other => other,
+    })?;
 
     let mut resolution_vars = acc_vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
     // Best-effort per-file resolution: a [vars] entry in this file may
     // legitimately reference vars introduced by a later file in the merge
     // chain, so we tolerate `ResolveNotConverged` / render errors here.
-    // The authoritative pass runs at the end of `load_merged` once every
-    // file has contributed; genuine render failures resurface from the
+    // The authoritative pass runs at the end of `load_internal` once every
+    // source has contributed; genuine render failures resurface from the
     // `engine.render` call below with a more useful location.
-    deferred.resolve(&mut resolution_vars, engine, extra_ctx, path, true)?;
+    deferred.resolve(&mut resolution_vars, engine, extra_ctx, &source_id, true)?;
 
     let mut ctx = extra_ctx.clone();
     ctx.insert("vars", &resolution_vars);
-    deferred.validate_indirect(raw, path, &ctx)?;
+    deferred.validate_indirect(raw, &source_id, &ctx)?;
 
     let (rendered, emissions) = deferred
         .render(raw, engine, &ctx)
-        .map_err(|e| include_paths.render_error(path, error_msg(&e)))?;
+        .map_err(|e| include_paths.render_error(&source_id, error_msg(&e)))?;
 
     let mut parsed: Table = rendered
         .parse()
-        .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
+        .map_err(|e: toml::de::Error| Error::Extract(format!("{source_id}: {e}")))?;
 
-    include_paths.check_rendered(&parsed, path)?;
+    include_paths.check_rendered(&parsed, &source_id)?;
     deferred
-        .normalize(&mut parsed, emissions)
-        .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_msg(&e))))?;
-    deferred.check_keys(&parsed, path)?;
+        .normalize(&mut parsed, emissions.as_ref())
+        .map_err(|e| Error::Render(format!("{source_id}: {}", error_msg(&e))))?;
+    deferred.check_keys(&parsed, &source_id)?;
+
+    if let Some(sources) = rendered_sources {
+        let rendered =
+            deferred.restore_rendered(rendered, emissions.as_ref().map(|e| e.prefix.as_str()))?;
+        sources.push(RenderedSource {
+            id: source_id,
+            is_root,
+            rendered,
+        });
+    }
+
     parsed.remove("include");
     parsed.remove("teravars");
 
@@ -238,6 +648,26 @@ pub fn deep_merge(base: &mut Table, overlay: Table) {
     }
 }
 
+fn resolve_include_path(
+    input: &SourceInput<'_>,
+    source_id: &SourceId,
+    rendered_include: &str,
+) -> Result<PathBuf> {
+    let target = Path::new(rendered_include);
+    if target.is_absolute() {
+        return Ok(target.to_path_buf());
+    }
+    match input {
+        SourceInput::Path(path) => Ok(resolve_relative(path, target)),
+        SourceInput::String { base_dir, .. } => match base_dir {
+            Some(dir) => Ok(dir.join(target)),
+            None => Err(Error::Extract(format!(
+                "{source_id} `include`: relative path `{rendered_include}` requires an explicit absolute base_dir"
+            ))),
+        },
+    }
+}
+
 fn resolve_relative(base_file: &Path, target: &Path) -> PathBuf {
     if target.is_absolute() {
         target.to_path_buf()
@@ -260,7 +690,7 @@ mod tests {
     use super::*;
 
     fn extract_include_paths(text: &str, path: &Path) -> Result<Vec<String>> {
-        include::extract_include_paths(text, path).map(|includes| includes.paths)
+        include::extract_include_paths(text, &SourceId::from(path)).map(|includes| includes.paths)
     }
 
     #[test]
