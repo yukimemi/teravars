@@ -89,10 +89,12 @@ impl From<&PathBuf> for SourceId {
 /// Explicitly distinguishes filesystem paths from named in-memory strings so
 /// embedded defaults (e.g. `include_str!`) and on-disk config files can be
 /// combined through the same loader.
+/// Borrowed inputs avoid copying paths and embedded text; owned inputs are
+/// also accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigSource {
+pub enum ConfigSource<'a> {
     /// Load a configuration file from the filesystem.
-    Path(PathBuf),
+    Path(Cow<'a, Path>),
     /// Load an in-memory TOML+Tera document identified by `name`.
     ///
     /// `name` is used only for diagnostics and duplicate detection and is never
@@ -100,15 +102,15 @@ pub enum ConfigSource {
     /// explicit absolute `base_dir`; absolute `include` paths work even when
     /// `base_dir` is `None`.
     String {
-        name: String,
-        content: String,
-        base_dir: Option<PathBuf>,
+        name: Cow<'a, str>,
+        content: Cow<'a, str>,
+        base_dir: Option<Cow<'a, Path>>,
     },
 }
 
-impl ConfigSource {
+impl<'a> ConfigSource<'a> {
     /// Construct a filesystem path source.
-    pub fn path(path: impl Into<PathBuf>) -> Self {
+    pub fn path(path: impl Into<Cow<'a, Path>>) -> Self {
         Self::Path(path.into())
     }
 
@@ -118,7 +120,7 @@ impl ConfigSource {
     /// Absolute `include` paths are still allowed, while relative `include`
     /// paths fail with a named error instead of silently resolving against the
     /// process working directory.
-    pub fn string(name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn string(name: impl Into<Cow<'a, str>>, content: impl Into<Cow<'a, str>>) -> Self {
         Self::String {
             name: name.into(),
             content: content.into(),
@@ -129,9 +131,9 @@ impl ConfigSource {
     /// Construct a named in-memory string source with an explicit absolute
     /// `base_dir` for resolving relative `include` paths.
     pub fn string_with_base_dir(
-        name: impl Into<String>,
-        content: impl Into<String>,
-        base_dir: impl Into<PathBuf>,
+        name: impl Into<Cow<'a, str>>,
+        content: impl Into<Cow<'a, str>>,
+        base_dir: impl Into<Cow<'a, Path>>,
     ) -> Self {
         Self::String {
             name: name.into(),
@@ -142,35 +144,35 @@ impl ConfigSource {
 
     fn as_input(&self) -> SourceInput<'_> {
         match self {
-            Self::Path(path) => SourceInput::Path(path.as_path()),
+            Self::Path(path) => SourceInput::Path(path.as_ref()),
             Self::String {
                 name,
                 content,
                 base_dir,
             } => SourceInput::String {
-                name: name.as_str(),
-                content: content.as_str(),
+                name: name.as_ref(),
+                content: content.as_ref(),
                 base_dir: base_dir.as_deref(),
             },
         }
     }
 }
 
-impl From<PathBuf> for ConfigSource {
+impl From<PathBuf> for ConfigSource<'_> {
     fn from(path: PathBuf) -> Self {
-        Self::Path(path)
+        Self::Path(Cow::Owned(path))
     }
 }
 
-impl From<&Path> for ConfigSource {
-    fn from(path: &Path) -> Self {
-        Self::Path(path.to_path_buf())
+impl<'a> From<&'a Path> for ConfigSource<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(Cow::Borrowed(path))
     }
 }
 
-impl From<&PathBuf> for ConfigSource {
-    fn from(path: &PathBuf) -> Self {
-        Self::Path(path.clone())
+impl<'a> From<&'a PathBuf> for ConfigSource<'a> {
+    fn from(path: &'a PathBuf) -> Self {
+        Self::from(path.as_path())
     }
 }
 
@@ -264,7 +266,9 @@ pub fn load_merged_with<P: AsRef<Path>>(
     options: &LoadOptions,
 ) -> Result<MergedConfig> {
     load_merged_sources_with(
-        paths.into_iter().map(|p| ConfigSource::path(p.as_ref())),
+        paths
+            .into_iter()
+            .map(|p| ConfigSource::path(p.as_ref().to_path_buf())),
         engine,
         extra_ctx,
         options,
@@ -300,7 +304,7 @@ pub fn load_merged_with<P: AsRef<Path>>(
 ///
 /// assert_eq!(merged.config["ui"]["command"].as_str(), Some("nvim"));
 /// ```
-pub fn load_merged_sources<S: Into<ConfigSource>>(
+pub fn load_merged_sources<'a, S: Into<ConfigSource<'a>>>(
     sources: impl IntoIterator<Item = S>,
     engine: &mut Engine,
     extra_ctx: &Context,
@@ -310,7 +314,7 @@ pub fn load_merged_sources<S: Into<ConfigSource>>(
 
 /// Like [`load_merged_sources`], with opt-in [`LoadOptions`] for preserving
 /// runtime-only Tera expressions.
-pub fn load_merged_sources_with<S: Into<ConfigSource>>(
+pub fn load_merged_sources_with<'a, S: Into<ConfigSource<'a>>>(
     sources: impl IntoIterator<Item = S>,
     engine: &mut Engine,
     extra_ctx: &Context,
@@ -348,7 +352,7 @@ pub fn load_merged_sources_with<S: Into<ConfigSource>>(
 /// assert_eq!(rendered.sources.len(), 1);
 /// assert_eq!(rendered.sources[0].id.as_name(), Some("defaults.toml"));
 /// ```
-pub fn load_merged_rendered<S: Into<ConfigSource>>(
+pub fn load_merged_rendered<'a, S: Into<ConfigSource<'a>>>(
     sources: impl IntoIterator<Item = S>,
     engine: &mut Engine,
     extra_ctx: &Context,
@@ -359,7 +363,7 @@ pub fn load_merged_rendered<S: Into<ConfigSource>>(
 /// Like [`load_merged_rendered`], with opt-in [`LoadOptions`] for preserving
 /// runtime-only Tera expressions in both the merged tables and the returned
 /// rendered text.
-pub fn load_merged_rendered_with<S: Into<ConfigSource>>(
+pub fn load_merged_rendered_with<'a, S: Into<ConfigSource<'a>>>(
     sources: impl IntoIterator<Item = S>,
     engine: &mut Engine,
     extra_ctx: &Context,
@@ -394,17 +398,27 @@ struct Visited {
     names: HashSet<String>,
 }
 
-fn load_internal<S: Into<ConfigSource>>(
+struct LoadState<'a> {
+    vars: Table,
+    config: Table,
+    visited: Visited,
+    rendered_sources: Option<&'a mut Vec<RenderedSource>>,
+}
+
+fn load_internal<'a, S: Into<ConfigSource<'a>>>(
     sources: impl IntoIterator<Item = S>,
     engine: &mut Engine,
     extra_ctx: &Context,
     options: &LoadOptions,
-    mut rendered_sources: Option<&mut Vec<RenderedSource>>,
+    rendered_sources: Option<&mut Vec<RenderedSource>>,
 ) -> Result<MergedConfig> {
     let mut deferred = Deferred::new(options, engine)?;
-    let mut acc_vars = Table::new();
-    let mut acc_config = Table::new();
-    let mut visited = Visited::default();
+    let mut state = LoadState {
+        vars: Table::new(),
+        config: Table::new(),
+        visited: Visited::default(),
+        rendered_sources,
+    };
 
     for source in sources {
         let source = source.into();
@@ -413,43 +427,36 @@ fn load_internal<S: Into<ConfigSource>>(
             true,
             engine,
             extra_ctx,
-            &mut acc_vars,
-            &mut acc_config,
-            &mut visited,
             &mut deferred,
-            rendered_sources.as_deref_mut(),
+            &mut state,
         )?;
     }
 
-    if !acc_vars.is_empty() {
+    if !state.vars.is_empty() {
         let merged_vars_id = SourceId::Name("<merged vars>".into());
-        deferred.resolve(&mut acc_vars, engine, extra_ctx, &merged_vars_id, false)?;
+        deferred.resolve(&mut state.vars, engine, extra_ctx, &merged_vars_id, false)?;
     }
-    deferred.restore(&mut acc_vars)?;
-    deferred.restore(&mut acc_config)?;
+    deferred.restore(&mut state.vars)?;
+    deferred.restore(&mut state.config)?;
 
     Ok(MergedConfig {
-        vars: acc_vars,
-        config: acc_config,
+        vars: state.vars,
+        config: state.config,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn load_source_recursive(
     input: SourceInput<'_>,
     is_root: bool,
     engine: &mut Engine,
     extra_ctx: &Context,
-    acc_vars: &mut Table,
-    acc_config: &mut Table,
-    visited: &mut Visited,
     deferred: &mut Deferred<'_>,
-    mut rendered_sources: Option<&mut Vec<RenderedSource>>,
+    state: &mut LoadState<'_>,
 ) -> Result<()> {
     let (source_id, raw): (SourceId, Cow<'_, str>) = match input {
         SourceInput::Path(path) => {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            if !visited.paths.insert(canonical.clone()) {
+            if !state.visited.paths.insert(canonical.clone()) {
                 return Err(Error::IncludeCycle { path: canonical });
             }
             let raw = std::fs::read_to_string(path).map_err(|e| {
@@ -483,7 +490,7 @@ fn load_source_recursive(
                     )));
                 }
             }
-            if !visited.names.insert(name.to_owned()) {
+            if !state.visited.names.insert(name.to_owned()) {
                 return Err(Error::IncludeCycle {
                     path: PathBuf::from(name),
                 });
@@ -513,11 +520,8 @@ fn load_source_recursive(
             false,
             engine,
             extra_ctx,
-            acc_vars,
-            acc_config,
-            visited,
             deferred,
-            rendered_sources.as_deref_mut(),
+            state,
         )?;
     }
 
@@ -533,7 +537,7 @@ fn load_source_recursive(
         other => other,
     })?;
 
-    let mut resolution_vars = acc_vars.clone();
+    let mut resolution_vars = state.vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
     // Best-effort per-file resolution: a [vars] entry in this file may
     // legitimately reference vars introduced by a later file in the merge
@@ -561,9 +565,10 @@ fn load_source_recursive(
         .map_err(|e| Error::Render(format!("{source_id}: {}", error_msg(&e))))?;
     deferred.check_keys(&parsed, &source_id)?;
 
-    if let Some(sources) = rendered_sources {
-        let rendered =
-            deferred.restore_rendered(rendered, emissions.as_ref().map(|e| e.prefix.as_str()))?;
+    if let Some(sources) = &mut state.rendered_sources {
+        let rendered = deferred
+            .restore_rendered(rendered, emissions.as_ref().map(|e| e.prefix.as_str()))
+            .map_err(|e| Error::Render(format!("{source_id}: {}", error_msg(&e))))?;
         sources.push(RenderedSource {
             id: source_id,
             is_root,
@@ -575,10 +580,10 @@ fn load_source_recursive(
     parsed.remove("teravars");
 
     if let Some(Value::Table(rendered_vars)) = parsed.get("vars").cloned() {
-        deep_merge(acc_vars, rendered_vars);
+        deep_merge(&mut state.vars, rendered_vars);
     }
 
-    deep_merge(acc_config, parsed);
+    deep_merge(&mut state.config, parsed);
 
     Ok(())
 }
@@ -660,7 +665,16 @@ fn resolve_include_path(
     match input {
         SourceInput::Path(path) => Ok(resolve_relative(path, target)),
         SourceInput::String { base_dir, .. } => match base_dir {
-            Some(dir) => Ok(dir.join(target)),
+            Some(dir) => {
+                let joined = dir.join(target);
+                if !joined.is_absolute() {
+                    return Err(Error::Extract(format!(
+                        "{source_id} `include`: path `{rendered_include}` does not resolve to an absolute path with base_dir `{}`",
+                        dir.display()
+                    )));
+                }
+                Ok(joined)
+            }
             None => Err(Error::Extract(format!(
                 "{source_id} `include`: relative path `{rendered_include}` requires an explicit absolute base_dir"
             ))),

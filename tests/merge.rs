@@ -1743,7 +1743,7 @@ fn string_source_rejects_relative_include_without_base_dir_and_invalid_base_dir(
             [ConfigSource::string_with_base_dir(
                 "embedded.toml",
                 "x = 1\n",
-                bad_base,
+                std::path::Path::new(bad_base),
             )],
             &mut Engine::new(),
             &Context::new(),
@@ -1765,6 +1765,28 @@ fn string_source_rejects_relative_include_without_base_dir_and_invalid_base_dir(
         .unwrap_err();
         assert!(matches!(err, Error::Extract(_)), "{bad_name:?}: {err}");
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn string_source_rejects_drive_relative_include() {
+    use teravars::{ConfigSource, load_merged_sources};
+
+    let err = load_merged_sources(
+        [ConfigSource::string_with_base_dir(
+            "embedded.toml",
+            "include = [\"D:foo.toml\"]\n",
+            std::path::Path::new("C:/configs"),
+        )],
+        &mut Engine::new(),
+        &Context::new(),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(matches!(err, Error::Extract(_)), "{msg}");
+    assert!(msg.contains("embedded.toml"), "{msg}");
+    assert!(msg.contains("D:foo.toml"), "{msg}");
+    assert!(msg.contains("base_dir"), "{msg}");
 }
 
 #[test]
