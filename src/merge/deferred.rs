@@ -32,14 +32,37 @@ impl LoadOptions {
         self
     }
 
+    fn validate(&self) -> Result<()> {
+        for (kind, value) in self
+            .names
+            .iter()
+            .map(|n| ("name", n))
+            .chain(self.prefixes.iter().map(|p| ("prefix", p)))
+        {
+            if !ident(value)
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(Error::Extract(format!(
+                    "invalid deferred variable {kind} `{value}`: expected [A-Za-z_][A-Za-z0-9_]*"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn matches(&self, name: &str) -> bool {
         self.names.contains(name) || self.prefixes.iter().any(|p| name.starts_with(p))
     }
 }
 
+const MARKER_END: char = '\u{e001}';
+
 pub(super) struct Deferred<'a> {
     options: &'a LoadOptions,
     prefix: String,
+    function_name: String,
     tags: Vec<String>,
     analyzer: Option<tera::Tera>,
 }
@@ -68,7 +91,8 @@ impl Emissions {
                     let mut rest = s.as_str();
                     while let Some(i) = rest.find(prefix) {
                         output.push_str(&rest[..i]);
-                        let Some((id, tail)) = rest[i + prefix.len()..].split_once("__") else {
+                        let Some((id, tail)) = rest[i + prefix.len()..].split_once(MARKER_END)
+                        else {
                             return Err(Error::Render("corrupted runtime variable marker".into()));
                         };
                         let Some(index) = id.parse::<usize>().ok().filter(|i| *i < seen.len())
@@ -78,7 +102,7 @@ impl Emissions {
                         seen[index] += 1;
                         output.push_str(persistent);
                         output.push_str(id);
-                        output.push_str("__");
+                        output.push(MARKER_END);
                         rest = tail;
                     }
                     output.push_str(rest);
@@ -186,21 +210,23 @@ impl<'a> Frame<'a> {
 }
 
 impl<'a> Deferred<'a> {
-    pub(super) fn new(options: &'a LoadOptions, engine: &mut crate::Engine) -> Self {
+    pub(super) fn new(options: &'a LoadOptions, engine: &mut crate::Engine) -> Result<Self> {
+        options.validate()?;
+        let nonce = RandomState::new().build_hasher().finish();
         let (prefix, analyzer) = if options.names.is_empty() && options.prefixes.is_empty() {
             (String::new(), None)
         } else {
             let mut analyzer = tera::Tera::default();
             analyzer.register_from(engine.tera_mut());
-            let nonce = RandomState::new().build_hasher().finish();
-            (format!("__teravars_deferred_{nonce:016x}_"), Some(analyzer))
+            (format!("\u{e000}{nonce}_"), Some(analyzer))
         };
-        Self {
+        Ok(Self {
             options,
             prefix,
+            function_name: format!("__teravars_emit_{nonce:016x}"),
             tags: Vec::new(),
             analyzer,
-        }
+        })
     }
 
     pub(super) fn active(&self) -> bool {
@@ -360,22 +386,13 @@ impl<'a> Deferred<'a> {
                     {
                         return Err(fail("is not supported inside a capture or component"));
                     }
-                    let marker = format!("{}{}__", self.prefix, self.tags.len());
+                    let marker = format!("{}{}{MARKER_END}", self.prefix, self.tags.len());
                     self.tags.push(tag.to_owned());
-                    if tag.starts_with("{{-") {
-                        out.truncate(
-                            out.trim_end_matches(|c: char| c.is_ascii_whitespace())
-                                .len(),
-                        );
-                    }
-                    out.push_str(&marker);
+                    let left = if tag.starts_with("{{-") { "-" } else { "" };
+                    let right = if tag.ends_with("-}}") { "-" } else { "" };
+                    let newlines = "\n".repeat(tag.matches('\n').count());
+                    out.push_str(&format!("{{{{{left} `{marker}`{newlines} {right}}}}}"));
                     pos = end;
-                    if tag.ends_with("-}}") {
-                        pos += text[pos..].len()
-                            - text[pos..]
-                                .trim_start_matches(|c: char| c.is_ascii_whitespace())
-                                .len();
-                    }
                     continue;
                 }
                 if kind == '%' {
@@ -475,8 +492,8 @@ impl<'a> Deferred<'a> {
         // distinct markers through a function. Count each actual emission
         // (rather than each source tag: a loop can repeat a tag, or a branch
         // can skip it) and require it to land in a parsed string value.
-        let name = format!("{}emit", self.prefix);
-        let prefix = format!("{}output_", self.prefix);
+        let name = &self.function_name;
+        let prefix = format!("\u{e002}{}", &self.prefix[3..]);
         let counts = Arc::new(Mutex::new(vec![0; self.tags.len()]));
         let calls = Arc::clone(&counts);
         let emitted_prefix = prefix.clone();
@@ -490,18 +507,23 @@ impl<'a> Deferred<'a> {
                     .get_mut(index)
                     .ok_or_else(|| tera::Error::message("unknown runtime variable marker"))?;
                 *count += 1;
-                Ok(format!("{emitted_prefix}{index}__"))
+                Ok(format!("{emitted_prefix}{index}{MARKER_END}"))
             },
         );
         let mut source = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(i) = rest.find(&self.prefix) {
-            source.push_str(&rest[..i]);
-            let (index, tail) = rest[i + self.prefix.len()..]
-                .split_once("__")
+            let before = rest[..i]
+                .strip_suffix('`')
                 .ok_or_else(|| Error::Render("corrupted runtime variable marker".into()))?;
-            source.push_str(&format!("{{{{ {name}(index={index}) }}}}"));
-            rest = tail;
+            source.push_str(before);
+            let (index, tail) = rest[i + self.prefix.len()..]
+                .split_once(MARKER_END)
+                .ok_or_else(|| Error::Render("corrupted runtime variable marker".into()))?;
+            source.push_str(&format!("{name}(index={index})"));
+            rest = tail
+                .strip_prefix('`')
+                .ok_or_else(|| Error::Render("corrupted runtime variable marker".into()))?;
         }
         source.push_str(rest);
         let output = tera.render_str(&source, ctx, false)?;
@@ -565,7 +587,7 @@ impl<'a> Deferred<'a> {
                 while let Some(i) = rest.find(&self.prefix) {
                     out.push_str(&rest[..i]);
                     rest = &rest[i + self.prefix.len()..];
-                    let Some((index, tail)) = rest.split_once("__") else {
+                    let Some((index, tail)) = rest.split_once(MARKER_END) else {
                         return Err(Error::Render("corrupted deferred marker".into()));
                     };
                     let Some(tag) = index.parse::<usize>().ok().and_then(|i| self.tags.get(i))

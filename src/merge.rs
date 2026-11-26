@@ -46,7 +46,7 @@ pub fn load_merged_with<P: AsRef<Path>>(
     extra_ctx: &Context,
     options: &LoadOptions,
 ) -> Result<MergedConfig> {
-    let mut deferred = Deferred::new(options, engine);
+    let mut deferred = Deferred::new(options, engine)?;
     let mut acc_vars = Table::new();
     let mut acc_config = Table::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();

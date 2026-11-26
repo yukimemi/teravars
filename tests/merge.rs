@@ -1262,6 +1262,11 @@ todoke = '{{ vars.prefix }} {{ group }} {{ file_path }} {{ cap[0] }} {{ passthro
 shun = '{{ args }} {{ args_list | join(sep=",") }} {{ file_name }} {{ file_dir }}'
 mixed = '{{ group ~ ":" ~ vars.prefix }}'
 propagated = '{{ vars.alias }}'
+upper_alias = '{{ vars.alias | upper }}'
+path_replace = "{{ file_path | replace(from='\\', to='/') }}"
+named_capture = '{{ cap.x }}'
+literal_tag = "{{ '{{ group }}' }}"
+trim_unicode = "a {{- group -}} b"
 trim = 'a   {{- group -}}   b'
 collision = '__teravars_deferred_0__'
 raw = '{% raw %}{{ group }}{% endraw %}'
@@ -1296,6 +1301,13 @@ runtime_name = "ordinary"
         r#"{{ group ~ ":" ~ vars.prefix }}"#
     );
     assert_eq!(commands["propagated"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["upper_alias"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["literal_tag"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["named_capture"].as_str().unwrap(), "{{ cap.x }}");
+    assert_eq!(
+        commands["path_replace"].as_str().unwrap(),
+        r#"{{ file_path | replace(from='\\', to='/') }}"#
+    );
     assert_eq!(commands["trim"].as_str().unwrap(), "a{{- group -}}b");
     assert_eq!(
         commands["collision"].as_str().unwrap(),
@@ -1338,6 +1350,24 @@ runtime_name = "ordinary"
             expected
         );
     }
+    ctx.insert("cap", &serde_json::json!({"x": "named"}));
+    ctx.insert("file_path", &r"C:\a\b.txt");
+    for (key, expected) in [
+        ("named_capture", "named"),
+        ("path_replace", "C:/a/b.txt"),
+        ("upper_alias", "dev"),
+    ] {
+        assert_eq!(
+            engine
+                .render(commands[key].as_str().unwrap(), &ctx)
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        commands["trim_unicode"].as_str().unwrap(),
+        engine.render("a {{- '{{- group -}}' -}} b", &ctx).unwrap()
+    );
 }
 
 #[test]
@@ -1432,4 +1462,24 @@ run = "{{ group }}"
                 && message.contains("owning table depends on Tera rendering")),
         "{err}"
     );
+}
+
+#[test]
+fn runtime_options_reject_invalid_identifiers() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "config.toml", "value = 'ordinary'");
+    for invalid in ["", "9name", "file_*", "a.b", "a b", "é"] {
+        for options in [
+            LoadOptions::new().defer(invalid),
+            LoadOptions::new().defer_prefix(invalid),
+        ] {
+            let err = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("invalid deferred variable"),
+                "{err}"
+            );
+        }
+    }
 }

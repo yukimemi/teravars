@@ -186,6 +186,8 @@ Names are matched on root variable references (not attributes, literals,
 or unrelated names). Prefix matching explicitly opts in every matching
 root name. The usual `load_merged` remains strict and does not defer any
 names.
+Exact names and prefixes must be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`);
+invalid options are rejected at load time.
 
 For example, the following string values can be loaded without runtime
 values in the context:
@@ -213,6 +215,11 @@ local variables cannot be deferred because those locals will not exist
 in the execution-time context. Tera comments and raw blocks are not
 interpreted as runtime references. Undeclared names in ordinary load-time
 expressions still cause normal Tera errors.
+
+Deferred tags retain their source spelling, not TOML-decoded spelling.
+In particular, a backslash escape inside a deferred tag in a TOML basic
+string is not decoded before the second Tera render. Check escaping against
+Tera's runtime syntax, or use TOML literal strings to avoid that ambiguity.
 
 ## Cargo features
 
