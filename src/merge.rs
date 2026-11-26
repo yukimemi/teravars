@@ -232,6 +232,9 @@ impl RenderedConfig {
     /// When a single root has no `include` or `[teravars]` directives, this
     /// text can be passed directly to `toml::from_str` for full line/column
     /// deserialization diagnostics.
+    /// Returning `Some` does not guarantee the absence of these directives;
+    /// callers that permit them must deserialize from [`MergedConfig::config`]
+    /// instead to retain included settings and omit reserved directives.
     pub fn rendered_root(&self) -> Option<&str> {
         self.root().map(|source| source.rendered.as_str())
     }

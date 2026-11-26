@@ -203,13 +203,9 @@ let rendered = load_merged_rendered(
     &system_context(),
 )?;
 
-// Single root with no `include` / `[teravars]` directives: deserialize the
-// actual rendered text directly so `toml::from_str` reports line/column spans.
-let cfg: MyConfig = if let Some(root_text) = rendered.rendered_root() {
-    toml::from_str(root_text)?
-} else {
-    rendered.merged.config.try_into()?
-};
+// General case: preserve settings from every included file and root,
+// and exclude reserved directives from the application config.
+let cfg: MyConfig = rendered.merged.config.try_into()?;
 
 // `config show --rendered`: inspect each rendered source in load order
 // (includes before the declaring root).
@@ -217,6 +213,21 @@ for source in &rendered.sources {
     println!("# --- {} ---\n{}", source.id, source.rendered);
 }
 ```
+
+For a consumer that guarantees exactly one root and forbids both the
+root `include` key and the reserved `teravars` namespace, deserialize the
+actual rendered text instead to retain `toml::from_str` line/column
+diagnostics:
+
+```rust
+let root_text = rendered.rendered_root().expect("single root");
+let cfg: MyConfig = toml::from_str(root_text)?;
+```
+
+`rendered_root()` returning `Some` establishes only the single-root
+condition. It does **not** establish that the root is directive-free.
+Do not use this direct-deserialization pattern as a fallback decision
+based solely on `rendered_root()`.
 
 Contract of `RenderedSource::rendered`:
 
@@ -226,9 +237,9 @@ Contract of `RenderedSource::rendered`:
   (including vars from earlier sources and includes); later sources' overrides
   are not retroactively reflected.
 - Unlike `merged.config`, any `include` or `[teravars]` directives present in a
-  source remain in its rendered text. When a root uses `include` (or when
-  multiple roots are loaded), deserialize the final config from
-  `rendered.merged.config`.
+  source remain in its rendered text. When a root uses `include` or the
+  reserved `teravars` namespace (even without includes), or when multiple
+  roots are loaded, deserialize from `rendered.merged.config`.
 - When `LoadOptions` runtime-only deferral is active, deferred tags are
   restored into valid TOML string literals while keeping the original line
   structure intact.
