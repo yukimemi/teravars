@@ -1591,6 +1591,33 @@ fn shadowed_vars_keep_load_time_filters_alongside_free_runtime_references() {
 }
 
 #[test]
+fn unresolved_raw_runtime_reference_is_not_classified_as_shadowed() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    for raw in [
+        "{% raw %}{{ group }}{% endraw %}",
+        "{%- raw -%}{{ group }}{%- endraw -%}",
+    ] {
+        let path = write(
+            &dir,
+            "config.toml",
+            &format!(
+                "{{% set local = 'ok' %}}\n[vars]\na = '{{{{ local }}}}'\nb = '{raw}'\n\
+                 [app]\nvalue = '{{{{ vars.b | upper }}}}'"
+            ),
+        );
+        let err = load_merged_with(
+            [&path],
+            &mut Engine::new(),
+            &Context::new(),
+            &LoadOptions::new().defer("group"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("runtime variable value"), "{err}");
+    }
+}
+
+#[test]
 fn inherited_raw_runtime_reference_is_not_exempted_by_identical_local_value() {
     use teravars::{LoadOptions, load_merged_with};
     let dir = TempDir::new().unwrap();

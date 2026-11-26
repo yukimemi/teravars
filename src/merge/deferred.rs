@@ -1095,6 +1095,36 @@ fn collect_classified(value: &tera::Value, original: &Value, addresses: &mut Has
     }
 }
 
+// Only output tags visited by the document scan were classified. Inert
+// template text inside raw blocks, comments or another tag was not.
+fn classified_outputs(s: &str) -> HashSet<usize> {
+    let mut outputs = HashSet::new();
+    let mut pos = 0;
+    while let Some(i) = s[pos..].find('{') {
+        let start = pos + i;
+        let tail = &s[start..];
+        let end = if tail.starts_with("{{") {
+            outputs.insert(start);
+            tera_tag_end(&tail[2..], b"}}")
+        } else if tail.starts_with("{%") {
+            tera_tag_end(&tail[2..], b"%}")
+        } else if tail.starts_with("{#") {
+            tail[2..].find("#}").map(|i| i + 2)
+        } else {
+            pos = start + 1;
+            continue;
+        };
+        let Some(end) = end else { break };
+        pos = start + 2 + end;
+        if tail.starts_with("{%")
+            && tokens(expression_body(&tail[2..end])).first() == Some(&"raw")
+        {
+            (_, pos) = super::include::raw_block_end(s, pos);
+        }
+    }
+    outputs
+}
+
 fn tainted(
     value: &tera::Value,
     ctx: &tera::Context,
@@ -1111,16 +1141,22 @@ fn tainted(
         if s.contains(prefix) {
             true
         } else {
+            let outputs = if classified.contains(&address) {
+                classified_outputs(s)
+            } else {
+                HashSet::new()
+            };
             let mut rest = s;
             let mut found = false;
             while let Some(start) = rest.find("{{") {
+                let classified_output = outputs.contains(&(s.len() - rest.len() + start));
                 rest = &rest[start + 2..];
                 let Some(end) = tera_tag_end(rest, b"}}") else {
                     break;
                 };
                 let words = tokens(expression_body(&rest[..end - 2]));
                 for root in references(&words) {
-                    if (runtime_name(root) && !classified.contains(&address))
+                    if (runtime_name(root) && !classified_output)
                         || ctx.get(root).is_some_and(|v| {
                             let (selected, _) = select_path(&words, root, v);
                             tainted(selected, ctx, prefix, runtime_name, classified, visiting)
