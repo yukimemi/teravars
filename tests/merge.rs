@@ -1618,6 +1618,39 @@ fn unresolved_raw_runtime_reference_is_not_classified_as_shadowed() {
 }
 
 #[test]
+fn decoded_runtime_reference_is_not_classified_as_shadowed() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    for value in [
+        r"\u007B\u007B group \u007D\u007D",
+        r"{{ group }} \u007B\u007B group \u007D\u007D",
+    ] {
+        let path = write(
+            &dir,
+            "config.toml",
+            &format!(
+                r#"
+{{% set group = 'local' %}}
+[vars]
+a = '{{{{ group }}}}'
+b = "{value}"
+[app]
+value = '{{{{ vars.b | length }}}}'
+"#
+            ),
+        );
+        let err = load_merged_with(
+            [&path],
+            &mut Engine::new(),
+            &Context::new(),
+            &LoadOptions::new().defer("group"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("runtime variable value"), "{err}");
+    }
+}
+
+#[test]
 fn inherited_raw_runtime_reference_is_not_exempted_by_identical_local_value() {
     use teravars::{LoadOptions, load_merged_with};
     let dir = TempDir::new().unwrap();

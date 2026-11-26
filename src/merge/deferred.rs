@@ -1,4 +1,4 @@
-use std::collections::{HashSet, hash_map::RandomState};
+use std::collections::{HashMap, HashSet, hash_map::RandomState};
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
@@ -242,6 +242,26 @@ impl<'a> Deferred<'a> {
     // tags are only restored into parsed string values after the final pass.
     pub(super) fn protect(&mut self, text: &str, source: &SourceId, allow: bool) -> Result<String> {
         self.protect_impl(text, source, allow, true, None, true)
+            .map(|(text, _)| text)
+    }
+
+    pub(super) fn protect_classified(
+        &mut self,
+        text: &str,
+        source: &SourceId,
+    ) -> Result<(String, Option<Table>)> {
+        let (text, offsets) = self.protect_impl(text, source, true, true, None, true)?;
+        if offsets.is_empty() {
+            return Ok((text, None));
+        }
+        // Carry scan provenance through TOML decoding, separately from the
+        // real document. Only matching decoded values can use these offsets.
+        let mut annotated = text.clone();
+        for offset in offsets.into_iter().rev() {
+            annotated.insert_str(offset, &self.prefix);
+        }
+        let classified = crate::vars::extract_vars(&annotated).ok();
+        Ok((text, classified))
     }
 
     fn protect_impl(
@@ -252,22 +272,23 @@ impl<'a> Deferred<'a> {
         document: bool,
         context: Option<(&tera::Context, Option<&Table>)>,
         classify_runtime: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<usize>)> {
         if !self.active() {
-            return Ok(text.to_owned());
+            return Ok((text.to_owned(), Vec::new()));
         }
         if document && context.is_none() && text.contains(&self.prefix) {
             return Err(Error::Render(format!(
                 "{source}: deferred marker collision"
             )));
         }
-        let classified = context.map_or_else(HashSet::new, |(ctx, vars)| {
-            let mut addresses = HashSet::new();
+        let classified = context.map_or_else(HashMap::new, |(ctx, vars)| {
+            let mut addresses = HashMap::new();
             if let (Some(value), Some(vars)) = (ctx.get("vars"), vars) {
-                collect_classified_table(value, vars, &mut addresses);
+                collect_classified_table(value, vars, &self.prefix, &mut addresses);
             }
             addresses
         });
+        let mut offsets = Vec::new();
         let mut out = String::with_capacity(text.len());
         let mut pos = 0;
         let mut quote = TomlQuote::default();
@@ -296,7 +317,7 @@ impl<'a> Deferred<'a> {
             };
             let Some(end) = end else {
                 out.push_str(tail);
-                return Ok(out);
+                return Ok((out, offsets));
             };
             let end = start + 2 + end;
             let tag = &text[start..end];
@@ -414,6 +435,15 @@ impl<'a> Deferred<'a> {
                     pos = end;
                     continue;
                 }
+                if document
+                    && context.is_none()
+                    && kind == '{'
+                    && quote.delimiter != 0
+                    && quote.value
+                    && refs.iter().any(|n| self.options.matches(n) && bound(n))
+                {
+                    offsets.push(out.len());
+                }
                 if let Some((ctx, _)) = context {
                     let simple_copy = kind == '{'
                         && (!document || (quote.delimiter != 0 && quote.value))
@@ -492,7 +522,7 @@ impl<'a> Deferred<'a> {
             pos = end;
         }
         out.push_str(&text[pos..]);
-        Ok(out)
+        Ok((out, offsets))
     }
 
     pub(super) fn resolve(
@@ -522,7 +552,7 @@ impl<'a> Deferred<'a> {
                 // surviving tags use the caller context just as ordinary vars
                 // extraction does; their enclosing document locals are absent.
                 // Subsequent iterations can expose new, unclassified tags.
-                let protected = self
+                let (protected, _) = self
                     .protect_impl(
                         text,
                         source,
@@ -1068,26 +1098,48 @@ pub(super) fn classified_vars(inherited: &Table, extracted: Table) -> Table {
     classified
 }
 
-fn collect_classified_table(value: &tera::Value, table: &Table, addresses: &mut HashSet<usize>) {
+type ClassifiedOutputs = HashMap<usize, HashSet<usize>>;
+
+fn collect_classified_table(
+    value: &tera::Value,
+    table: &Table,
+    prefix: &str,
+    addresses: &mut ClassifiedOutputs,
+) {
     if let Some(map) = value.as_map() {
         for (key, original) in table {
             if let Some(value) = map.get(&tera::value::Key::String(Arc::from(key.as_str()))) {
-                collect_classified(value, original, addresses);
+                collect_classified(value, original, prefix, addresses);
             }
         }
     }
 }
 
-fn collect_classified(value: &tera::Value, original: &Value, addresses: &mut HashSet<usize>) {
+fn collect_classified(
+    value: &tera::Value,
+    original: &Value,
+    prefix: &str,
+    addresses: &mut ClassifiedOutputs,
+) {
     match original {
-        Value::String(s) if value.as_str() == Some(s.as_str()) => {
-            addresses.insert(value as *const _ as usize);
+        Value::String(s) if s.contains(prefix) => {
+            let mut restored = String::new();
+            let mut offsets = HashSet::new();
+            let mut parts = s.split(prefix);
+            restored.push_str(parts.next().unwrap());
+            for part in parts {
+                offsets.insert(restored.len());
+                restored.push_str(part);
+            }
+            if value.as_str() == Some(restored.as_str()) {
+                addresses.insert(value as *const _ as usize, offsets);
+            }
         }
-        Value::Table(table) => collect_classified_table(value, table, addresses),
+        Value::Table(table) => collect_classified_table(value, table, prefix, addresses),
         Value::Array(items) => {
             if let Some(array) = value.as_array() {
                 for (value, original) in array.iter().zip(items) {
-                    collect_classified(value, original, addresses);
+                    collect_classified(value, original, prefix, addresses);
                 }
             }
         }
@@ -1095,42 +1147,12 @@ fn collect_classified(value: &tera::Value, original: &Value, addresses: &mut Has
     }
 }
 
-// Only output tags visited by the document scan were classified. Inert
-// template text inside raw blocks, comments or another tag was not.
-fn classified_outputs(s: &str) -> HashSet<usize> {
-    let mut outputs = HashSet::new();
-    let mut pos = 0;
-    while let Some(i) = s[pos..].find('{') {
-        let start = pos + i;
-        let tail = &s[start..];
-        let end = if tail.starts_with("{{") {
-            outputs.insert(start);
-            tera_tag_end(&tail[2..], b"}}")
-        } else if tail.starts_with("{%") {
-            tera_tag_end(&tail[2..], b"%}")
-        } else if tail.starts_with("{#") {
-            tail[2..].find("#}").map(|i| i + 2)
-        } else {
-            pos = start + 1;
-            continue;
-        };
-        let Some(end) = end else { break };
-        pos = start + 2 + end;
-        if tail.starts_with("{%")
-            && tokens(expression_body(&tail[2..end])).first() == Some(&"raw")
-        {
-            (_, pos) = super::include::raw_block_end(s, pos);
-        }
-    }
-    outputs
-}
-
 fn tainted(
     value: &tera::Value,
     ctx: &tera::Context,
     prefix: &str,
     runtime_name: &impl Fn(&str) -> bool,
-    classified: &HashSet<usize>,
+    classified: &ClassifiedOutputs,
     visiting: &mut HashSet<usize>,
 ) -> bool {
     let address = value as *const _ as usize;
@@ -1141,15 +1163,12 @@ fn tainted(
         if s.contains(prefix) {
             true
         } else {
-            let outputs = if classified.contains(&address) {
-                classified_outputs(s)
-            } else {
-                HashSet::new()
-            };
+            let outputs = classified.get(&address);
             let mut rest = s;
             let mut found = false;
             while let Some(start) = rest.find("{{") {
-                let classified_output = outputs.contains(&(s.len() - rest.len() + start));
+                let classified_output =
+                    outputs.is_some_and(|o| o.contains(&(s.len() - rest.len() + start)));
                 rest = &rest[start + 2..];
                 let Some(end) = tera_tag_end(rest, b"}}") else {
                     break;
@@ -1230,7 +1249,7 @@ fn indirect_use(
     ctx: &tera::Context,
     prefix: &str,
     runtime_name: &impl Fn(&str) -> bool,
-    (classified, bound): (&HashSet<usize>, &impl Fn(&str) -> bool),
+    (classified, bound): (&ClassifiedOutputs, &impl Fn(&str) -> bool),
     simple_copy: bool,
 ) -> bool {
     for root in references(words) {

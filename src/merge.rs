@@ -529,8 +529,11 @@ fn load_source_recursive(
     }
 
     let protected;
+    let mut classified = None;
     let raw = if deferred.active() {
-        protected = deferred.protect(&raw, &source_id, true)?;
+        let (text, annotated) = deferred.protect_classified(&raw, &source_id)?;
+        protected = text;
+        classified = annotated.map(|vars| deferred::classified_vars(&state.vars, vars));
         protected.as_str()
     } else {
         raw.as_ref()
@@ -540,9 +543,6 @@ fn load_source_recursive(
         other => other,
     })?;
 
-    let classified = deferred
-        .active()
-        .then(|| deferred::classified_vars(&state.vars, file_vars.clone()));
     let mut resolution_vars = state.vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
     // Best-effort per-file resolution: a [vars] entry in this file may
