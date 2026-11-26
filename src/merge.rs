@@ -437,7 +437,14 @@ fn load_internal<'a, S: Into<ConfigSource<'a>>>(
 
     if !state.vars.is_empty() {
         let merged_vars_id = SourceId::Name("<merged vars>".into());
-        deferred.resolve(&mut state.vars, engine, extra_ctx, &merged_vars_id, false)?;
+        deferred.resolve(
+            &mut state.vars,
+            engine,
+            extra_ctx,
+            &merged_vars_id,
+            false,
+            None,
+        )?;
     }
     deferred.restore(&mut state.vars)?;
     deferred.restore(&mut state.config)?;
@@ -529,8 +536,11 @@ fn load_source_recursive(
     }
 
     let protected;
+    let mut classified = None;
     let raw = if deferred.active() {
-        protected = deferred.protect(&raw, &source_id, true)?;
+        let (text, annotated) = deferred.protect_classified(&raw, &source_id)?;
+        protected = text;
+        classified = annotated.map(|vars| deferred::classified_vars(&state.vars, vars));
         protected.as_str()
     } else {
         raw.as_ref()
@@ -548,11 +558,18 @@ fn load_source_recursive(
     // The authoritative pass runs at the end of `load_internal` once every
     // source has contributed; genuine render failures resurface from the
     // `engine.render` call below with a more useful location.
-    deferred.resolve(&mut resolution_vars, engine, extra_ctx, &source_id, true)?;
+    deferred.resolve(
+        &mut resolution_vars,
+        engine,
+        extra_ctx,
+        &source_id,
+        true,
+        classified.as_ref(),
+    )?;
 
     let mut ctx = extra_ctx.clone();
     ctx.insert("vars", &resolution_vars);
-    deferred.validate_indirect(raw, &source_id, &ctx)?;
+    deferred.validate_indirect(raw, &source_id, &ctx, classified.as_ref())?;
 
     let (rendered, emissions) = deferred
         .render(raw, engine, &ctx)
