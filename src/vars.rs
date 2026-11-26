@@ -169,6 +169,15 @@ pub fn resolve_in_context_with_max_iter(
     extra_ctx: &Context,
     max_iter: usize,
 ) -> Result<()> {
+    resolve_with_renderer(vars, extra_ctx, max_iter, |s, ctx, _| engine.render(s, ctx))
+}
+
+pub(crate) fn resolve_with_renderer(
+    vars: &mut Table,
+    extra_ctx: &Context,
+    max_iter: usize,
+    mut render: impl FnMut(&str, &Context, usize) -> Result<String>,
+) -> Result<()> {
     if vars.is_empty() {
         return Ok(());
     }
@@ -177,12 +186,15 @@ pub fn resolve_in_context_with_max_iter(
     // caller-supplied context once and refresh only the `vars` binding on
     // each iteration of the fixpoint loop.
     let mut ctx = extra_ctx.clone();
-    for _ in 0..max_iter {
+    for iteration in 0..max_iter {
         ctx.insert("vars", &*vars);
 
         let mut next = Table::new();
         for (k, v) in vars.iter() {
-            next.insert(k.clone(), render_value(v, engine, &ctx)?);
+            next.insert(
+                k.clone(),
+                render_value(v, &mut |s, ctx| render(s, ctx, iteration), &ctx)?,
+            );
         }
 
         let converged = next == *vars;
@@ -218,20 +230,24 @@ pub fn expand_value(value: &mut Value, engine: &mut Engine, ctx: &Context) -> Re
     Ok(())
 }
 
-fn render_value(v: &Value, engine: &mut Engine, ctx: &Context) -> Result<Value> {
+fn render_value(
+    v: &Value,
+    render: &mut impl FnMut(&str, &Context) -> Result<String>,
+    ctx: &Context,
+) -> Result<Value> {
     match v {
-        Value::String(s) => Ok(Value::String(engine.render(s, ctx)?)),
+        Value::String(s) => Ok(Value::String(render(s, ctx)?)),
         Value::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for item in arr {
-                out.push(render_value(item, engine, ctx)?);
+                out.push(render_value(item, render, ctx)?);
             }
             Ok(Value::Array(out))
         }
         Value::Table(t) => {
             let mut out = Table::new();
             for (k, vv) in t {
-                out.insert(k.clone(), render_value(vv, engine, ctx)?);
+                out.insert(k.clone(), render_value(vv, render, ctx)?);
             }
             Ok(Value::Table(out))
         }

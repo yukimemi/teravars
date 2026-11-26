@@ -1236,3 +1236,328 @@ run = "cargo make on-add --port {{ vars.port }}"
         "deferred vcs.* placeholders must survive the load pass"
     );
 }
+
+#[test]
+fn runtime_expressions_survive_includes_and_second_render() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "base.toml",
+        r#"
+[vars]
+prefix = "run"
+runtime = '{{ group }}'
+alias = '{{ vars.runtime }}'
+raw_runtime = '{% raw %}{{ group }}{% endraw %}'
+"#,
+    );
+    let path = write(
+        &dir,
+        "config.toml",
+        r##"
+include = ["base.toml"]
+[commands]
+todoke = '{{ vars.prefix }} {{ group }} {{ file_path }} {{ cap[0] }} {{ passthrough | join(sep=" ") }}'
+shun = '{{ args }} {{ args_list | join(sep=",") }} {{ file_name }} {{ file_dir }}'
+mixed = '{{ group ~ ":" ~ vars.prefix }}'
+propagated = '{{ vars.alias }}'
+path_replace = "{{ file_path | replace(from='\\', to='/') }}"
+named_capture = '{{ cap.x }}'
+literal_tag = "{{ '{{ group }}' }}"
+trim_unicode = "a {{- group -}} b"
+trim = 'a   {{- group -}}   b'
+collision = '__teravars_deferred_0__'
+raw = '{% raw %}{{ group }}{% endraw %}'
+literal = '{{ "group" }}'
+attribute = '{{ vars.runtime_name }}'
+quoted = "{{ cap[0] | replace(from="a", to="#") }}" # trailing comment
+array = ['{{ group }}', { key = '{{ cap[0] }}' }]
+# {% if group %} ignored
+commented = 'a{# {{ group }} #}b'
+[vars]
+runtime_name = "ordinary"
+"##,
+    );
+    let options = LoadOptions::new()
+        .defer("group")
+        .defer("file_path")
+        .defer("cap")
+        .defer("passthrough")
+        .defer("args")
+        .defer("args_list")
+        .defer_prefix("file_");
+    let mut engine = Engine::new();
+    let mut ctx = Context::new();
+    let merged = load_merged_with([&path], &mut engine, &ctx, &options).unwrap();
+    let commands = merged.config["commands"].as_table().unwrap();
+    assert_eq!(
+        commands["todoke"].as_str().unwrap(),
+        r#"run {{ group }} {{ file_path }} {{ cap[0] }} {{ passthrough | join(sep=" ") }}"#
+    );
+    assert_eq!(
+        commands["mixed"].as_str().unwrap(),
+        r#"{{ group ~ ":" ~ vars.prefix }}"#
+    );
+    assert_eq!(commands["propagated"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["literal_tag"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["named_capture"].as_str().unwrap(), "{{ cap.x }}");
+    assert_eq!(
+        commands["path_replace"].as_str().unwrap(),
+        r#"{{ file_path | replace(from='\\', to='/') }}"#
+    );
+    assert_eq!(commands["trim"].as_str().unwrap(), "a{{- group -}}b");
+    assert_eq!(
+        commands["collision"].as_str().unwrap(),
+        "__teravars_deferred_0__"
+    );
+    assert_eq!(commands["raw"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(commands["literal"].as_str().unwrap(), "group");
+    assert_eq!(commands["attribute"].as_str().unwrap(), "ordinary");
+    assert_eq!(merged.vars["raw_runtime"].as_str().unwrap(), "{{ group }}");
+    assert_eq!(
+        commands["quoted"].as_str().unwrap(),
+        r##"{{ cap[0] | replace(from="a", to="#") }}"##
+    );
+    assert_eq!(commands["array"][0].as_str().unwrap(), "{{ group }}");
+    assert_eq!(
+        commands["array"][1]["key"].as_str().unwrap(),
+        "{{ cap[0] }}"
+    );
+    assert_eq!(commands["commented"].as_str().unwrap(), "ab");
+    ctx.insert("vars", &merged.vars);
+    ctx.insert("group", &"dev");
+    ctx.insert("file_path", &"path");
+    ctx.insert("cap", &["capture"]);
+    ctx.insert("passthrough", &["a", "b"]);
+    ctx.insert("args", &"one two");
+    ctx.insert("args_list", &["one", "two"]);
+    ctx.insert("file_name", &"name");
+    ctx.insert("file_dir", &"dir");
+    for (key, expected) in [
+        ("todoke", "run dev path capture a b"),
+        ("shun", "one two one,two name dir"),
+        ("mixed", "dev:run"),
+        ("propagated", "dev"),
+        ("trim", "adevb"),
+    ] {
+        assert_eq!(
+            engine
+                .render(commands[key].as_str().unwrap(), &ctx)
+                .unwrap(),
+            expected
+        );
+    }
+    ctx.insert("cap", &serde_json::json!({"x": "named"}));
+    ctx.insert("file_path", &r"C:\a\b.txt");
+    for (key, expected) in [("named_capture", "named"), ("path_replace", "C:/a/b.txt")] {
+        assert_eq!(
+            engine
+                .render(commands[key].as_str().unwrap(), &ctx)
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        commands["trim_unicode"].as_str().unwrap(),
+        engine.render("a {{- '{{- group -}}' -}} b", &ctx).unwrap()
+    );
+}
+
+#[test]
+fn runtime_expressions_do_not_defer_unrelated_or_local_names() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+{% set group = "local" %}
+local = '{{ group }}'
+{% if true %}{% set file_branch = "yes" %}{% else %}{% set file_branch = "no" %}{% endif %}
+branch = '{{ file_branch }}'
+{% for file_name in ["a", "b"] %}
+[[items]]
+name = '{{ file_name }}'
+{% endfor %}
+[other]
+comprehension = '{{ [group for group in ["a", "b"]] | join(sep=",") }}'
+"#,
+    );
+    let options = LoadOptions::new().defer("group").defer_prefix("file_");
+    let mut engine = Engine::new();
+    let merged = load_merged_with([&path], &mut engine, &Context::new(), &options).unwrap();
+    assert_eq!(merged.config["local"].as_str().unwrap(), "local");
+    assert_eq!(merged.config["branch"].as_str().unwrap(), "yes");
+    assert_eq!(merged.config["items"][0]["name"].as_str().unwrap(), "a");
+    assert_eq!(
+        merged.config["other"]["comprehension"].as_str().unwrap(),
+        "a,b"
+    );
+    let path = write(&dir, "bad.toml", "value = '{{ group_extra }}'");
+    let err = load_merged_with([&path], &mut engine, &Context::new(), &options).unwrap_err();
+    assert!(err.to_string().contains("group_extra"), "{err}");
+}
+
+#[test]
+fn runtime_expressions_reject_structural_contexts() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let options = LoadOptions::new().defer("group");
+    let mut engine = Engine::new();
+    for source in [
+        "include = ['{{ group }}']",
+        "value = {{ group }}",
+        "'{{ group }}' = 'value'",
+        "['{{ group }}']\nvalue = 'x'",
+        "{% if group %}\nvalue = 'x'\n{% endif %}",
+        "{% set x = group %}\nvalue = '{{ x }}'",
+        "{% for x in ['a'] %}\nvalue = '{{ group ~ x }}'\n{% endfor %}",
+        "{% if flag %}{% set group = 'x' %}{% endif %}\nvalue = '{{ group }}'",
+        "{{ '#' }} value = '{{ group }}'",
+    ] {
+        let path = write(&dir, "bad.toml", source);
+        let err = load_merged_with([&path], &mut engine, &Context::new(), &options).unwrap_err();
+        assert!(
+            err.to_string().contains("runtime variable"),
+            "{source}: {err}"
+        );
+    }
+}
+
+#[test]
+fn runtime_deferral_does_not_relax_ambiguous_include_ownership() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        r#"
+{% if show_app %}
+[app]
+{% endif %}
+include = ["missing.toml"]
+[commands]
+run = "{{ group }}"
+"#,
+    );
+    let mut ctx = Context::new();
+    ctx.insert("show_app", &false);
+    let err = load_merged_with(
+        [&path],
+        &mut Engine::new(),
+        &ctx,
+        &LoadOptions::new().defer("group"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Extract(message)
+            if message.contains("config.toml `include`")
+                && message.contains("owning table depends on Tera rendering")),
+        "{err}"
+    );
+}
+
+#[test]
+fn runtime_options_reject_invalid_identifiers() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "config.toml", "value = 'ordinary'");
+    for invalid in ["", "9name", "file_*", "a.b", "a b", "é"] {
+        for options in [
+            LoadOptions::new().defer(invalid),
+            LoadOptions::new().defer_prefix(invalid),
+        ] {
+            let err = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("invalid deferred variable"),
+                "{err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_aliases_cannot_drive_load_time_operations() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "base.toml",
+        "[vars]\nruntime = '{{ group }}'\nalias = '{{ vars.runtime }}'\nordinary = 'abc'\n",
+    );
+    let options = LoadOptions::new().defer("group");
+    for source in [
+        "[app]\n{% if vars.runtime == 'dev' %}\nvalue = 'yes'\n{% endif %}",
+        "[app]\nvalue = '{{ vars.runtime | length }}'",
+        "[app]\nvalue = '{{ vars.alias | upper }}'",
+        "[app]\nvalue = '{{ vars[\"runtime\"] | length }}'",
+        "[app]\n{% set x = vars.runtime %}\nvalue = '{{ x }}'",
+        "[vars]\nsecond = '{{ vars.alias }}'\nlength = '{{ vars.second | length }}'",
+    ] {
+        let path = write(
+            &dir,
+            "config.toml",
+            &format!("include = ['base.toml']\n{source}"),
+        );
+        let err =
+            load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap_err();
+        assert!(
+            err.to_string().contains("runtime variable value"),
+            "{source}: {err}"
+        );
+    }
+    let path = write(
+        &dir,
+        "config.toml",
+        "include = ['base.toml']\n[app]\nvalue = '{{ vars.ordinary | length }}'\ncopy = '{{ vars[\"alias\"] }}'",
+    );
+    let merged = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap();
+    assert_eq!(merged.config["app"]["value"].as_str(), Some("3"));
+    assert_eq!(merged.config["app"]["copy"].as_str(), Some("{{ group }}"));
+}
+
+#[test]
+fn malformed_runtime_expression_is_not_deferred() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let options = LoadOptions::new().defer("group");
+    for expression in ["{{ group + }}", "{{ group - }}", "{{- group - }}"] {
+        let path = write(&dir, "config.toml", &format!("value = '{expression}'"));
+        assert!(
+            load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).is_err(),
+            "{expression}"
+        );
+    }
+    let path = write(&dir, "config.toml", "value = '{{ group | runtime_only }}'");
+    let merged = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap();
+    assert_eq!(
+        merged.config["value"].as_str(),
+        Some("{{ group | runtime_only }}")
+    );
+}
+
+#[test]
+fn runtime_names_shadowed_in_extracted_vars_keep_load_time_resolution() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        "{% set group = 'local' %}\n[vars]\na = '{{ group }}'\n[app]\nvalue = '{{ vars.a | upper }}'",
+    );
+    let mut ctx = Context::new();
+    ctx.insert("group", &"load");
+    let baseline = load_merged([&path], &mut Engine::new(), &ctx).unwrap();
+    let merged = load_merged_with(
+        [&path],
+        &mut Engine::new(),
+        &ctx,
+        &LoadOptions::new().defer("group"),
+    )
+    .unwrap();
+    assert_eq!(merged.vars, baseline.vars);
+    assert_eq!(merged.config, baseline.config);
+    assert_eq!(merged.config["app"]["value"].as_str(), Some("LOAD"));
+}

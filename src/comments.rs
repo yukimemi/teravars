@@ -113,6 +113,8 @@ enum State {
 #[derive(Default)]
 struct Scanner {
     state: State,
+    return_state: State,
+    raw: bool,
     /// Quote byte of the string literal currently open *inside* a Tera
     /// expression or statement, if any.
     tera_quote: Option<u8>,
@@ -131,12 +133,53 @@ impl Scanner {
         let mut i = 0;
 
         while i < b.len() {
+            // Tera tags are recognized even inside TOML strings: their own
+            // quotes are not TOML delimiters. Raw bodies instead contain
+            // ordinary TOML text until the matching endraw tag.
+            if !matches!(
+                self.state,
+                State::TeraExpr | State::TeraStmt | State::TeraComment
+            ) && b[i] == b'{'
+                && let Some((state, width)) = open_at(b, i)
+                && matches!(
+                    state,
+                    State::TeraExpr | State::TeraStmt | State::TeraComment
+                )
+            {
+                let statement = if matches!(state, State::TeraStmt) {
+                    let body = &line[i + width..];
+                    tera_tag_end(body, b"%}").map(|end| (trim_tera_tag(&body[..end - 2]), end))
+                } else {
+                    None
+                };
+                if self.raw {
+                    if let Some(("endraw", end)) = statement {
+                        self.raw = false;
+                        i += width + end;
+                        continue;
+                    }
+                } else if let Some(("raw", end)) = statement {
+                    self.raw = true;
+                    i += width + end;
+                    continue;
+                } else {
+                    self.return_state = self.state;
+                    self.state = state;
+                    i += width;
+                    continue;
+                }
+            }
             match self.state {
                 State::Normal => {
                     if b[i] == b'#' {
                         return Some(i);
                     }
-                    if let Some((state, width)) = open_at(b, i) {
+                    if let Some((state, width)) = open_at(b, i)
+                        && !matches!(
+                            state,
+                            State::TeraExpr | State::TeraStmt | State::TeraComment
+                        )
+                    {
                         self.state = state;
                         i += width;
                         continue;
@@ -180,7 +223,7 @@ impl Scanner {
                         b"%}"
                     };
                     if let Some(end) = scan_tera_body(b, i, delim, &mut self.tera_quote) {
-                        self.state = State::Normal;
+                        self.state = self.return_state;
                         i = end;
                     } else {
                         break;
@@ -208,7 +251,7 @@ impl Scanner {
     /// if it starts at `i`; returns how far to advance.
     fn close(&mut self, b: &[u8], i: usize, delim: &[u8]) -> usize {
         if at(b, i, delim) {
-            self.state = State::Normal;
+            self.state = self.return_state;
             delim.len()
         } else {
             1

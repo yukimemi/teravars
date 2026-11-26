@@ -156,6 +156,78 @@ Use `[teravars] include = [...]` to keep the directive in the reserved
 `teravars` namespace. An `include` key in any other table is ordinary
 application config.
 
+### Runtime-only expressions (todoke / shun)
+
+Use `LoadOptions` with `load_merged_with` when some variables are only
+available at execution time. For example, todoke can load its configuration
+with:
+
+```rust
+use teravars::{LoadOptions, load_merged_with};
+
+let options = LoadOptions::new()
+    .defer("group")
+    .defer("file_path")
+    .defer("cap")
+    .defer("passthrough");
+let merged = load_merged_with(paths, &mut engine, &load_context, &options)?;
+```
+
+For shun, use:
+
+```rust
+let options = LoadOptions::new()
+    .defer("args")
+    .defer("args_list")
+    .defer_prefix("file_");
+```
+
+Names are matched on root variable references (not attributes, literals,
+or unrelated names). Prefix matching explicitly opts in every matching
+root name. The usual `load_merged` remains strict and does not defer any
+names.
+Exact names and prefixes must be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`);
+invalid options are rejected at load time.
+
+For example, the following string values can be loaded without runtime
+values in the context:
+
+```toml
+[command]
+todoke = '{{ vars.program }} {{ group }} {{ file_path }} {{ cap[0] }} {{ passthrough | join(sep=" ") }}'
+shun = '{{ args }} {{ args_list | join(sep=" ") }} {{ file_name }}'
+mixed = '{{ group ~ ":" ~ vars.program }}'
+```
+
+`vars.program` in the first line renders at load time (including from an
+included file). Any output tag containing a free runtime-only reference is
+preserved **whole**, including filters, indexing and whitespace-control
+delimiters. The `mixed` tag above is not partially evaluated. At execution
+time, call `Engine::render` on the loaded string with actual runtime
+values and any other context used by its deferred tags, including `vars`
+from `merged.vars` and `system` if referenced.
+
+Supported positions are TOML string values, including strings in arrays,
+inline tables and `[vars]`. Runtime-only references in control statements,
+assignments, include paths, TOML keys, table headers and unquoted values
+are unsupported. A tag mixing runtime-only references and load-time
+local variables cannot be deferred because those locals will not exist
+in the execution-time context. Tera comments and raw blocks are not
+interpreted as runtime references. Undeclared names in ordinary load-time
+expressions still cause normal Tera errors.
+
+Values containing deferred tags may be copied directly into other string
+values (for example, `{{ vars.command }}`). They cannot be inspected,
+filtered, indexed as strings, assigned to load-time locals or used in
+control expressions. Use a runtime-only reference in the original output
+expression instead. Dynamic selection from a container holding deferred
+values is also unsupported; use a static field or index.
+
+Deferred tags retain their source spelling, not TOML-decoded spelling.
+In particular, a backslash escape inside a deferred tag in a TOML basic
+string is not decoded before the second Tera render. Check escaping against
+Tera's runtime syntax, or use TOML literal strings to avoid that ambiguity.
+
 ## Cargo features
 
 | feature       | default | what it adds |
