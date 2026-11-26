@@ -236,7 +236,7 @@ impl<'a> Deferred<'a> {
     // Keep markers opaque through both vars resolution passes. The original
     // tags are only restored into parsed string values after the final pass.
     pub(super) fn protect(&mut self, text: &str, path: &Path, allow: bool) -> Result<String> {
-        self.protect_impl(text, path, allow, true)
+        self.protect_impl(text, path, allow, true, None)
     }
 
     fn protect_impl(
@@ -245,11 +245,12 @@ impl<'a> Deferred<'a> {
         path: &Path,
         allow: bool,
         document: bool,
+        ctx: Option<&tera::Context>,
     ) -> Result<String> {
         if !self.active() {
             return Ok(text.to_owned());
         }
-        if document && text.contains(&self.prefix) {
+        if document && ctx.is_none() && text.contains(&self.prefix) {
             return Err(Error::Render(format!(
                 "{}: deferred marker collision",
                 path.display()
@@ -338,7 +339,8 @@ impl<'a> Deferred<'a> {
                     format!("{{{{ {expression} }}}}")
                 };
                 let analyzer = self.analyzer.as_mut().unwrap();
-                let refs = if analyzer.add_raw_template("expression", &candidate).is_ok() {
+                let parsed = analyzer.add_raw_template("expression", &candidate);
+                let refs = if parsed.is_ok() {
                     analyzer
                         .get_template_variables("expression")
                         .unwrap_or_default()
@@ -371,6 +373,12 @@ impl<'a> Deferred<'a> {
                             path.display()
                         ))
                     };
+                    if kind == '{'
+                        && let Err(err) = &parsed
+                        && matches!(err.kind(), tera::ErrorKind::SyntaxError(_))
+                    {
+                        return Err(Error::Render(format!("{}:{line}: {err}", path.display())));
+                    }
                     if kind != '{' || !allow {
                         return Err(fail("is not supported in this context"));
                     }
@@ -394,6 +402,28 @@ impl<'a> Deferred<'a> {
                     out.push_str(&format!("{{{{{left} `{marker}`{newlines} {right}}}}}"));
                     pos = end;
                     continue;
+                }
+                if let Some(ctx) = ctx {
+                    let simple_copy = kind == '{'
+                        && (!document || (quote.delimiter != 0 && quote.value))
+                        && !frames
+                            .iter()
+                            .any(|f| matches!(f.kind, "filter" | "set" | "macro" | "component"));
+                    if indirect_use(
+                        expr,
+                        &refs,
+                        ctx,
+                        &self.prefix,
+                        self.options,
+                        &bound,
+                        simple_copy,
+                    ) {
+                        let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
+                        return Err(Error::Render(format!(
+                            "{}:{line}: runtime variable value may only be copied directly into a string; defer the original expression instead",
+                            path.display()
+                        )));
+                    }
                 }
                 if kind == '%' {
                     match first {
@@ -461,11 +491,14 @@ impl<'a> Deferred<'a> {
         engine: &mut crate::Engine,
         ctx: &tera::Context,
         path: &Path,
+        best_effort: bool,
     ) -> Result<()> {
         if !self.active() {
-            return crate::vars::resolve_in_context(vars, engine, ctx);
+            let result = crate::vars::resolve_in_context(vars, engine, ctx);
+            return if best_effort { Ok(()) } else { result };
         }
-        crate::vars::resolve_with_renderer(
+        let mut invalid = false;
+        let result = crate::vars::resolve_with_renderer(
             vars,
             ctx,
             crate::vars::DEFAULT_MAX_RESOLVE_ITERATIONS,
@@ -473,10 +506,29 @@ impl<'a> Deferred<'a> {
                 if !text.contains("{{") && !text.contains("{%") {
                     return engine.render(text, ctx);
                 }
-                let protected = self.protect_impl(text, path, true, false)?;
+                let protected = self
+                    .protect_impl(text, path, true, false, Some(ctx))
+                    .inspect_err(|_| invalid = true)?;
                 engine.render(&protected, ctx)
             },
-        )
+        );
+        if best_effort && !invalid {
+            Ok(())
+        } else {
+            result
+        }
+    }
+
+    pub(super) fn validate_indirect(
+        &mut self,
+        text: &str,
+        path: &Path,
+        ctx: &tera::Context,
+    ) -> Result<()> {
+        if self.active() {
+            self.protect_impl(text, path, true, true, Some(ctx))?;
+        }
+        Ok(())
     }
 
     pub(super) fn render(
@@ -757,4 +809,124 @@ impl TomlQuote {
             }
         }
     }
+}
+
+fn tainted(
+    value: &tera::Value,
+    ctx: &tera::Context,
+    prefix: &str,
+    options: &LoadOptions,
+    visiting: &mut HashSet<usize>,
+) -> bool {
+    let address = value as *const _ as usize;
+    if !visiting.insert(address) {
+        return false;
+    }
+    let result = if let Some(s) = value.as_str() {
+        if s.contains(prefix) {
+            true
+        } else {
+            let mut rest = s;
+            let mut found = false;
+            while let Some(start) = rest.find("{{") {
+                rest = &rest[start + 2..];
+                let Some(end) = tera_tag_end(rest, b"}}") else {
+                    break;
+                };
+                let words = tokens(trim_tera_tag(&rest[..end - 2]));
+                for root in references(&words) {
+                    if options.matches(root)
+                        || ctx.get(root).is_some_and(|v| {
+                            let (selected, _) = select_path(&words, root, v);
+                            tainted(selected, ctx, prefix, options, visiting)
+                        })
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+                rest = &rest[end..];
+            }
+            found
+        }
+    } else {
+        value
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| tainted(v, ctx, prefix, options, visiting)))
+            || value.as_map().is_some_and(|m| {
+                m.values()
+                    .any(|v| tainted(v, ctx, prefix, options, visiting))
+            })
+    };
+    visiting.remove(&address);
+    result
+}
+
+fn select_path<'a>(
+    words: &[&str],
+    root: &str,
+    mut value: &'a tera::Value,
+) -> (&'a tera::Value, usize) {
+    let start = words
+        .iter()
+        .position(|word| std::ptr::eq(word.as_ptr(), root.as_ptr()))
+        .unwrap();
+    let mut end = start + 1;
+    while end < words.len() {
+        let (key, width) = match words[end..] {
+            [".", key, ..] => (key, 2),
+            ["[", key, "]", ..] if key.bytes().all(|b| b.is_ascii_digit()) => (key, 3),
+            ["[", key, "]", ..]
+                if key.starts_with(['\'', '"', '`']) && key.len() >= 2 && !key.contains('\\') =>
+            {
+                (&key[1..key.len() - 1], 3)
+            }
+            _ => break,
+        };
+        let next = if let Some(map) = value.as_map() {
+            map.get(&tera::value::Key::String(Arc::from(key)))
+        } else if let Some(array) = value.as_array() {
+            key.parse::<usize>().ok().and_then(|i| array.get(i))
+        } else {
+            None
+        };
+        let Some(next) = next else { break };
+        value = next;
+        end += width;
+    }
+    (value, end)
+}
+
+// Only statically selected, unmodified string values can carry markers across
+// load-time expressions. Dynamic selection from a tainted container is
+// deliberately rejected rather than evaluating it with placeholder data.
+fn indirect_use(
+    words: &[&str],
+    refs: &[&str],
+    ctx: &tera::Context,
+    prefix: &str,
+    options: &LoadOptions,
+    bound: &impl Fn(&str) -> bool,
+    simple_copy: bool,
+) -> bool {
+    for root in references(words) {
+        if !refs.contains(&root) || bound(root) {
+            continue;
+        }
+        let Some(value) = ctx.get(root) else { continue };
+        let start = words
+            .iter()
+            .position(|word| std::ptr::eq(word.as_ptr(), root.as_ptr()))
+            .unwrap();
+        let (value, end) = select_path(words, root, value);
+        if tainted(value, ctx, prefix, options, &mut HashSet::new())
+            && !(simple_copy && start == 0 && end == words.len() && value.is_string())
+        {
+            return true;
+        }
+    }
+    false
 }

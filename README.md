@@ -216,6 +216,13 @@ in the execution-time context. Tera comments and raw blocks are not
 interpreted as runtime references. Undeclared names in ordinary load-time
 expressions still cause normal Tera errors.
 
+Values containing deferred tags may be copied directly into other string
+values (for example, `{{ vars.command }}`). They cannot be inspected,
+filtered, indexed as strings, assigned to load-time locals or used in
+control expressions. Use a runtime-only reference in the original output
+expression instead. Dynamic selection from a container holding deferred
+values is also unsupported; use a static field or index.
+
 Deferred tags retain their source spelling, not TOML-decoded spelling.
 In particular, a backslash escape inside a deferred tag in a TOML basic
 string is not decoded before the second Tera render. Check escaping against

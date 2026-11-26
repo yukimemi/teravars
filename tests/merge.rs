@@ -1262,7 +1262,6 @@ todoke = '{{ vars.prefix }} {{ group }} {{ file_path }} {{ cap[0] }} {{ passthro
 shun = '{{ args }} {{ args_list | join(sep=",") }} {{ file_name }} {{ file_dir }}'
 mixed = '{{ group ~ ":" ~ vars.prefix }}'
 propagated = '{{ vars.alias }}'
-upper_alias = '{{ vars.alias | upper }}'
 path_replace = "{{ file_path | replace(from='\\', to='/') }}"
 named_capture = '{{ cap.x }}'
 literal_tag = "{{ '{{ group }}' }}"
@@ -1301,7 +1300,6 @@ runtime_name = "ordinary"
         r#"{{ group ~ ":" ~ vars.prefix }}"#
     );
     assert_eq!(commands["propagated"].as_str().unwrap(), "{{ group }}");
-    assert_eq!(commands["upper_alias"].as_str().unwrap(), "{{ group }}");
     assert_eq!(commands["literal_tag"].as_str().unwrap(), "{{ group }}");
     assert_eq!(commands["named_capture"].as_str().unwrap(), "{{ cap.x }}");
     assert_eq!(
@@ -1352,11 +1350,7 @@ runtime_name = "ordinary"
     }
     ctx.insert("cap", &serde_json::json!({"x": "named"}));
     ctx.insert("file_path", &r"C:\a\b.txt");
-    for (key, expected) in [
-        ("named_capture", "named"),
-        ("path_replace", "C:/a/b.txt"),
-        ("upper_alias", "dev"),
-    ] {
+    for (key, expected) in [("named_capture", "named"), ("path_replace", "C:/a/b.txt")] {
         assert_eq!(
             engine
                 .render(commands[key].as_str().unwrap(), &ctx)
@@ -1482,4 +1476,59 @@ fn runtime_options_reject_invalid_identifiers() {
             );
         }
     }
+}
+
+#[test]
+fn runtime_aliases_cannot_drive_load_time_operations() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "base.toml",
+        "[vars]\nruntime = '{{ group }}'\nalias = '{{ vars.runtime }}'\nordinary = 'abc'\n",
+    );
+    let options = LoadOptions::new().defer("group");
+    for source in [
+        "[app]\n{% if vars.runtime == 'dev' %}\nvalue = 'yes'\n{% endif %}",
+        "[app]\nvalue = '{{ vars.runtime | length }}'",
+        "[app]\nvalue = '{{ vars.alias | upper }}'",
+        "[app]\nvalue = '{{ vars[\"runtime\"] | length }}'",
+        "[app]\n{% set x = vars.runtime %}\nvalue = '{{ x }}'",
+        "[vars]\nsecond = '{{ vars.alias }}'\nlength = '{{ vars.second | length }}'",
+    ] {
+        let path = write(
+            &dir,
+            "config.toml",
+            &format!("include = ['base.toml']\n{source}"),
+        );
+        let err =
+            load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap_err();
+        assert!(
+            err.to_string().contains("runtime variable value"),
+            "{source}: {err}"
+        );
+    }
+    let path = write(
+        &dir,
+        "config.toml",
+        "include = ['base.toml']\n[app]\nvalue = '{{ vars.ordinary | length }}'\ncopy = '{{ vars[\"alias\"] }}'",
+    );
+    let merged = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap();
+    assert_eq!(merged.config["app"]["value"].as_str(), Some("3"));
+    assert_eq!(merged.config["app"]["copy"].as_str(), Some("{{ group }}"));
+}
+
+#[test]
+fn malformed_runtime_expression_is_not_deferred() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let options = LoadOptions::new().defer("group");
+    let path = write(&dir, "config.toml", "value = '{{ group + }}'");
+    assert!(load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).is_err());
+    let path = write(&dir, "config.toml", "value = '{{ group | runtime_only }}'");
+    let merged = load_merged_with([&path], &mut Engine::new(), &Context::new(), &options).unwrap();
+    assert_eq!(
+        merged.config["value"].as_str(),
+        Some("{{ group | runtime_only }}")
+    );
 }

@@ -40,6 +40,8 @@ pub fn load_merged<P: AsRef<Path>>(
 /// include paths, keys and table headers cannot reference runtime-only names.
 /// Mixed expressions are preserved whole, so the second render must supply
 /// their other dependencies as well.
+/// String values carrying deferred tags may be copied unchanged through
+/// static variable paths, but cannot be filtered or used in control flow.
 pub fn load_merged_with<P: AsRef<Path>>(
     paths: impl IntoIterator<Item = P>,
     engine: &mut Engine,
@@ -64,7 +66,13 @@ pub fn load_merged_with<P: AsRef<Path>>(
     }
 
     if !acc_vars.is_empty() {
-        deferred.resolve(&mut acc_vars, engine, extra_ctx, Path::new("<merged vars>"))?;
+        deferred.resolve(
+            &mut acc_vars,
+            engine,
+            extra_ctx,
+            Path::new("<merged vars>"),
+            false,
+        )?;
     }
     deferred.restore(&mut acc_vars)?;
     deferred.restore(&mut acc_config)?;
@@ -134,10 +142,11 @@ fn load_file_recursive(
     // The authoritative pass runs at the end of `load_merged` once every
     // file has contributed; genuine render failures resurface from the
     // `engine.render` call below with a more useful location.
-    let _ = deferred.resolve(&mut resolution_vars, engine, extra_ctx, path);
+    deferred.resolve(&mut resolution_vars, engine, extra_ctx, path, true)?;
 
     let mut ctx = extra_ctx.clone();
     ctx.insert("vars", &resolution_vars);
+    deferred.validate_indirect(raw, path, &ctx)?;
 
     let (rendered, emissions) = deferred
         .render(raw, engine, &ctx)
