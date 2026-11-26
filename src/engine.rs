@@ -95,6 +95,14 @@ mod tests {
     }
 
     #[test]
+    fn render_toml_with_multiline_raw_tag_strips_comments() {
+        let mut engine = Engine::new();
+        let src = "x = '''{% raw\n%}{# literal{% endraw %}''' # {{ missing }}";
+        let out = engine.render_toml(src, &Context::new()).unwrap();
+        assert_eq!(out, "x = '''{# literal''' ");
+    }
+
+    #[test]
     fn new_minimal_has_no_default_helpers() {
         let mut engine = Engine::new_minimal();
         let ctx = Context::new();
