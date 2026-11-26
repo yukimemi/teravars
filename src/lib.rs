@@ -52,7 +52,9 @@ pub use vars::{
 };
 
 #[cfg(feature = "merge")]
-pub use merge::{MergedConfig, deep_merge, discover_config_files, load_merged};
+pub use merge::{
+    LoadOptions, MergedConfig, deep_merge, discover_config_files, load_merged, load_merged_with,
+};
 
 pub use tera::Context;
 

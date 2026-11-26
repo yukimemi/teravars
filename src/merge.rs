@@ -2,6 +2,7 @@
 //! Tera rendering and an `include = [...]` directive that lets a config file
 //! pull in other files before it is processed.
 
+mod deferred;
 mod include;
 
 use std::collections::HashSet;
@@ -14,7 +15,9 @@ use crate::Result;
 use crate::comments::strip_toml_comments;
 use crate::engine::Engine;
 use crate::error::Error;
-use crate::vars::{extract_vars, resolve_in_context};
+use crate::vars::extract_vars;
+use deferred::Deferred;
+pub use deferred::LoadOptions;
 use include::extract_include_paths;
 
 #[derive(Debug, Clone, Default)]
@@ -28,6 +31,22 @@ pub fn load_merged<P: AsRef<Path>>(
     engine: &mut Engine,
     extra_ctx: &Context,
 ) -> Result<MergedConfig> {
+    load_merged_with(paths, engine, extra_ctx, &LoadOptions::default())
+}
+
+/// Load configuration with opt-in preservation of runtime-only expressions.
+///
+/// Deferred output tags survive verbatim in string values. Control statements,
+/// include paths, keys and table headers cannot reference runtime-only names.
+/// Mixed expressions are preserved whole, so the second render must supply
+/// their other dependencies as well.
+pub fn load_merged_with<P: AsRef<Path>>(
+    paths: impl IntoIterator<Item = P>,
+    engine: &mut Engine,
+    extra_ctx: &Context,
+    options: &LoadOptions,
+) -> Result<MergedConfig> {
+    let mut deferred = Deferred::new(options, engine);
     let mut acc_vars = Table::new();
     let mut acc_config = Table::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
@@ -40,12 +59,15 @@ pub fn load_merged<P: AsRef<Path>>(
             &mut acc_vars,
             &mut acc_config,
             &mut visited,
+            &mut deferred,
         )?;
     }
 
     if !acc_vars.is_empty() {
-        resolve_in_context(&mut acc_vars, engine, extra_ctx)?;
+        deferred.resolve(&mut acc_vars, engine, extra_ctx, Path::new("<merged vars>"))?;
     }
+    deferred.restore(&mut acc_vars)?;
+    deferred.restore(&mut acc_config)?;
 
     Ok(MergedConfig {
         vars: acc_vars,
@@ -60,6 +82,7 @@ fn load_file_recursive(
     acc_vars: &mut Table,
     acc_config: &mut Table,
     visited: &mut HashSet<PathBuf>,
+    deferred: &mut Deferred<'_>,
 ) -> Result<()> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(canonical.clone()) {
@@ -82,14 +105,26 @@ fn load_file_recursive(
 
     let include_paths = extract_include_paths(&raw, path)?;
     for raw_inc in &include_paths.paths {
+        if deferred.active() {
+            deferred.protect(raw_inc, path, false)?;
+        }
         let rendered = engine
             .render(raw_inc, extra_ctx)
             .map_err(|e| Error::Render(format!("{} include: {}", path.display(), error_msg(&e))))?;
         let inc_path = resolve_relative(path, Path::new(&rendered));
-        load_file_recursive(&inc_path, engine, extra_ctx, acc_vars, acc_config, visited)?;
+        load_file_recursive(
+            &inc_path, engine, extra_ctx, acc_vars, acc_config, visited, deferred,
+        )?;
     }
 
-    let file_vars = extract_vars(&raw)?;
+    let protected;
+    let raw = if deferred.active() {
+        protected = deferred.protect(&raw, path, true)?;
+        protected.as_str()
+    } else {
+        raw.as_ref()
+    };
+    let file_vars = extract_vars(raw)?;
 
     let mut resolution_vars = acc_vars.clone();
     deep_merge(&mut resolution_vars, file_vars);
@@ -99,13 +134,13 @@ fn load_file_recursive(
     // The authoritative pass runs at the end of `load_merged` once every
     // file has contributed; genuine render failures resurface from the
     // `engine.render` call below with a more useful location.
-    let _ = resolve_in_context(&mut resolution_vars, engine, extra_ctx);
+    let _ = deferred.resolve(&mut resolution_vars, engine, extra_ctx, path);
 
     let mut ctx = extra_ctx.clone();
     ctx.insert("vars", &resolution_vars);
 
-    let rendered = engine
-        .render(&raw, &ctx)
+    let (rendered, emissions) = deferred
+        .render(raw, engine, &ctx)
         .map_err(|e| include_paths.render_error(path, error_msg(&e)))?;
 
     let mut parsed: Table = rendered
@@ -113,6 +148,10 @@ fn load_file_recursive(
         .map_err(|e: toml::de::Error| Error::Extract(format!("{}: {e}", path.display())))?;
 
     include_paths.check_rendered(&parsed, path)?;
+    deferred
+        .normalize(&mut parsed, emissions)
+        .map_err(|e| Error::Render(format!("{}: {}", path.display(), error_msg(&e))))?;
+    deferred.check_keys(&parsed, path)?;
     parsed.remove("include");
     parsed.remove("teravars");
 

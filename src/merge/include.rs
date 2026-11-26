@@ -540,7 +540,7 @@ fn block_delta(keyword: &str, args: &str) -> i8 {
     }
 }
 
-fn raw_block_end(text: &str, mut offset: usize) -> (usize, usize) {
+pub(super) fn raw_block_end(text: &str, mut offset: usize) -> (usize, usize) {
     while let Some(open) = text[offset..].find("{%") {
         let start = offset + open;
         offset = start + 2;
