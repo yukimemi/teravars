@@ -437,7 +437,14 @@ fn load_internal<'a, S: Into<ConfigSource<'a>>>(
 
     if !state.vars.is_empty() {
         let merged_vars_id = SourceId::Name("<merged vars>".into());
-        deferred.resolve(&mut state.vars, engine, extra_ctx, &merged_vars_id, false, None)?;
+        deferred.resolve(
+            &mut state.vars,
+            engine,
+            extra_ctx,
+            &merged_vars_id,
+            false,
+            None,
+        )?;
     }
     deferred.restore(&mut state.vars)?;
     deferred.restore(&mut state.config)?;

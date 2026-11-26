@@ -1587,7 +1587,10 @@ fn shadowed_vars_keep_load_time_filters_alongside_free_runtime_references() {
     assert_eq!(merged.config["app"]["free"].as_str(), Some("{{ group }}"));
     assert_eq!(merged.vars["a"]["items"][0].as_str(), Some("local"));
     assert_eq!(merged.vars["b"].as_str(), Some("11"));
-    assert_eq!(merged.config["other"]["value"].as_str(), Some("{{ GROUP }}"));
+    assert_eq!(
+        merged.config["other"]["value"].as_str(),
+        Some("{{ GROUP }}")
+    );
 }
 
 #[test]

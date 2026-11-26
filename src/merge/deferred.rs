@@ -1262,8 +1262,14 @@ fn indirect_use(
             .position(|word| std::ptr::eq(word.as_ptr(), root.as_ptr()))
             .unwrap();
         let (value, end) = select_path(words, root, value);
-        if tainted(value, ctx, prefix, runtime_name, classified, &mut HashSet::new())
-            && !(simple_copy && start == 0 && end == words.len() && value.is_string())
+        if tainted(
+            value,
+            ctx,
+            prefix,
+            runtime_name,
+            classified,
+            &mut HashSet::new(),
+        ) && !(simple_copy && start == 0 && end == words.len() && value.is_string())
         {
             return true;
         }
