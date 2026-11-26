@@ -250,17 +250,24 @@ impl<'a> Deferred<'a> {
         source: &SourceId,
         allow: bool,
         document: bool,
-        ctx: Option<&tera::Context>,
+        context: Option<(&tera::Context, Option<&Table>)>,
         classify_runtime: bool,
     ) -> Result<String> {
         if !self.active() {
             return Ok(text.to_owned());
         }
-        if document && ctx.is_none() && text.contains(&self.prefix) {
+        if document && context.is_none() && text.contains(&self.prefix) {
             return Err(Error::Render(format!(
                 "{source}: deferred marker collision"
             )));
         }
+        let classified = context.map_or_else(HashSet::new, |(ctx, vars)| {
+            let mut addresses = HashSet::new();
+            if let (Some(value), Some(vars)) = (ctx.get("vars"), vars) {
+                collect_classified_table(value, vars, &mut addresses);
+            }
+            addresses
+        });
         let mut out = String::with_capacity(text.len());
         let mut pos = 0;
         let mut quote = TomlQuote::default();
@@ -407,7 +414,7 @@ impl<'a> Deferred<'a> {
                     pos = end;
                     continue;
                 }
-                if let Some(ctx) = ctx {
+                if let Some((ctx, _)) = context {
                     let simple_copy = kind == '{'
                         && (!document || (quote.delimiter != 0 && quote.value))
                         && !frames
@@ -418,11 +425,8 @@ impl<'a> Deferred<'a> {
                         &refs,
                         ctx,
                         &self.prefix,
-                        &|name| {
-                            self.options.matches(name)
-                                && (classify_runtime || !ctx.contains_key(name))
-                        },
-                        &bound,
+                        &|name| self.options.matches(name),
+                        (&classified, &bound),
                         simple_copy,
                     ) {
                         let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
@@ -498,6 +502,7 @@ impl<'a> Deferred<'a> {
         ctx: &tera::Context,
         source: &SourceId,
         best_effort: bool,
+        classified: Option<&Table>,
     ) -> Result<()> {
         if !self.active() {
             let result = crate::vars::resolve_in_context(vars, engine, ctx);
@@ -523,7 +528,7 @@ impl<'a> Deferred<'a> {
                         source,
                         true,
                         false,
-                        Some(ctx),
+                        Some((ctx, classified)),
                         !best_effort || iteration != 0,
                     )
                     .inspect_err(|_| invalid = true)?;
@@ -542,9 +547,10 @@ impl<'a> Deferred<'a> {
         text: &str,
         source: &SourceId,
         ctx: &tera::Context,
+        classified: Option<&Table>,
     ) -> Result<()> {
         if self.active() {
-            self.protect_impl(text, source, true, true, Some(ctx), true)?;
+            self.protect_impl(text, source, true, true, Some((ctx, classified)), false)?;
         }
         Ok(())
     }
@@ -1046,11 +1052,55 @@ impl TomlQuote {
     }
 }
 
+// Preserve array offsets and table merge rules, without trusting inherited strings.
+pub(super) fn classified_vars(inherited: &Table, extracted: Table) -> Table {
+    fn forget(value: &mut Value) {
+        match value {
+            Value::String(_) => *value = Value::Boolean(false),
+            Value::Array(items) => items.iter_mut().for_each(forget),
+            Value::Table(table) => table.iter_mut().for_each(|(_, value)| forget(value)),
+            _ => {}
+        }
+    }
+    let mut classified = inherited.clone();
+    classified.iter_mut().for_each(|(_, value)| forget(value));
+    super::deep_merge(&mut classified, extracted);
+    classified
+}
+
+fn collect_classified_table(value: &tera::Value, table: &Table, addresses: &mut HashSet<usize>) {
+    if let Some(map) = value.as_map() {
+        for (key, original) in table {
+            if let Some(value) = map.get(&tera::value::Key::String(Arc::from(key.as_str()))) {
+                collect_classified(value, original, addresses);
+            }
+        }
+    }
+}
+
+fn collect_classified(value: &tera::Value, original: &Value, addresses: &mut HashSet<usize>) {
+    match original {
+        Value::String(s) if value.as_str() == Some(s.as_str()) => {
+            addresses.insert(value as *const _ as usize);
+        }
+        Value::Table(table) => collect_classified_table(value, table, addresses),
+        Value::Array(items) => {
+            if let Some(array) = value.as_array() {
+                for (value, original) in array.iter().zip(items) {
+                    collect_classified(value, original, addresses);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn tainted(
     value: &tera::Value,
     ctx: &tera::Context,
     prefix: &str,
     runtime_name: &impl Fn(&str) -> bool,
+    classified: &HashSet<usize>,
     visiting: &mut HashSet<usize>,
 ) -> bool {
     let address = value as *const _ as usize;
@@ -1070,10 +1120,10 @@ fn tainted(
                 };
                 let words = tokens(expression_body(&rest[..end - 2]));
                 for root in references(&words) {
-                    if runtime_name(root)
+                    if (runtime_name(root) && !classified.contains(&address))
                         || ctx.get(root).is_some_and(|v| {
                             let (selected, _) = select_path(&words, root, v);
-                            tainted(selected, ctx, prefix, runtime_name, visiting)
+                            tainted(selected, ctx, prefix, runtime_name, classified, visiting)
                         })
                     {
                         found = true;
@@ -1090,10 +1140,10 @@ fn tainted(
     } else {
         value.as_array().is_some_and(|a| {
             a.iter()
-                .any(|v| tainted(v, ctx, prefix, runtime_name, visiting))
+                .any(|v| tainted(v, ctx, prefix, runtime_name, classified, visiting))
         }) || value.as_map().is_some_and(|m| {
             m.values()
-                .any(|v| tainted(v, ctx, prefix, runtime_name, visiting))
+                .any(|v| tainted(v, ctx, prefix, runtime_name, classified, visiting))
         })
     };
     visiting.remove(&address);
@@ -1144,7 +1194,7 @@ fn indirect_use(
     ctx: &tera::Context,
     prefix: &str,
     runtime_name: &impl Fn(&str) -> bool,
-    bound: &impl Fn(&str) -> bool,
+    (classified, bound): (&HashSet<usize>, &impl Fn(&str) -> bool),
     simple_copy: bool,
 ) -> bool {
     for root in references(words) {
@@ -1157,7 +1207,7 @@ fn indirect_use(
             .position(|word| std::ptr::eq(word.as_ptr(), root.as_ptr()))
             .unwrap();
         let (value, end) = select_path(words, root, value);
-        if tainted(value, ctx, prefix, runtime_name, &mut HashSet::new())
+        if tainted(value, ctx, prefix, runtime_name, classified, &mut HashSet::new())
             && !(simple_copy && start == 0 && end == words.len() && value.is_string())
         {
             return true;

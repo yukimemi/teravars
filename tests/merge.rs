@@ -1547,19 +1547,73 @@ fn runtime_names_shadowed_in_extracted_vars_keep_load_time_resolution() {
         "config.toml",
         "{% set group = 'local' %}\n[vars]\na = '{{ group }}'\n[app]\nvalue = '{{ vars.a | upper }}'",
     );
-    let mut ctx = Context::new();
-    ctx.insert("group", &"load");
-    let baseline = load_merged([&path], &mut Engine::new(), &ctx).unwrap();
+    for caller_group in [None, Some("load")] {
+        let mut ctx = Context::new();
+        if let Some(group) = caller_group {
+            ctx.insert("group", &group);
+        }
+        let baseline = load_merged([&path], &mut Engine::new(), &ctx).unwrap();
+        let merged = load_merged_with(
+            [&path],
+            &mut Engine::new(),
+            &ctx,
+            &LoadOptions::new().defer("group"),
+        )
+        .unwrap();
+        assert_eq!(merged.vars, baseline.vars);
+        assert_eq!(merged.config, baseline.config);
+    }
+}
+
+#[test]
+fn shadowed_vars_keep_load_time_filters_alongside_free_runtime_references() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "config.toml",
+        "[app]\nfree = '{{ group }}'\n{% set group = 'local' %}\n\
+         [vars]\na = { items = ['{{ group }}'] }\n\
+         b = '{{ vars.a.items[0] | length }}'\n\
+         [other]\nvalue = '{{ vars.a.items[0] | upper }}'",
+    );
     let merged = load_merged_with(
         [&path],
         &mut Engine::new(),
-        &ctx,
+        &Context::new(),
         &LoadOptions::new().defer("group"),
     )
     .unwrap();
-    assert_eq!(merged.vars, baseline.vars);
-    assert_eq!(merged.config, baseline.config);
-    assert_eq!(merged.config["app"]["value"].as_str(), Some("LOAD"));
+    assert_eq!(merged.config["app"]["free"].as_str(), Some("{{ group }}"));
+    assert_eq!(merged.vars["a"]["items"][0].as_str(), Some("local"));
+    assert_eq!(merged.vars["b"].as_str(), Some("11"));
+    assert_eq!(merged.config["other"]["value"].as_str(), Some("{{ GROUP }}"));
+}
+
+#[test]
+fn inherited_raw_runtime_reference_is_not_exempted_by_identical_local_value() {
+    use teravars::{LoadOptions, load_merged_with};
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "base.toml",
+        "[vars]\nitems = ['{% raw %}{{ group }}{% endraw %}']",
+    );
+    let path = write(
+        &dir,
+        "config.toml",
+        "include = ['base.toml']\n{% set group = 'local' %}\n\
+         [vars]\nitems = ['{{ group }}']\n\
+         [app]\nvalue = '{{ vars.items[0] | upper }}'",
+    );
+    let err = load_merged_with(
+        [&path],
+        &mut Engine::new(),
+        &Context::new(),
+        &LoadOptions::new().defer("group"),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("runtime variable value"), "{err}");
 }
 
 #[test]
