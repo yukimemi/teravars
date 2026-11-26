@@ -73,7 +73,7 @@ pub fn strip_toml_comments(text: &str) -> Cow<'_, str> {
             None => (rest, "", ""),
         };
 
-        match scanner.scan_line(line) {
+        match scanner.scan_line(text, text.len() - rest.len(), line.len()) {
             // Drop the comment and any `\r` that trailed it; the line
             // terminator is re-emitted below, so the line count is stable.
             Some(idx) => out.push_str(&line[..idx]),
@@ -115,6 +115,8 @@ struct Scanner {
     state: State,
     return_state: State,
     raw: bool,
+    /// Absolute end offset of a raw tag that may span multiple lines.
+    resume_at: usize,
     /// Quote byte of the string literal currently open *inside* a Tera
     /// expression or statement, if any.
     tera_quote: Option<u8>,
@@ -128,9 +130,12 @@ impl Scanner {
     /// UTF-8 continuation byte is always >= 0x80, so a multi-byte character
     /// can never be mistaken for a delimiter — and the only offset returned
     /// points at an ASCII `#`.
-    fn scan_line(&mut self, line: &str) -> Option<usize> {
-        let b = line.as_bytes();
-        let mut i = 0;
+    fn scan_line(&mut self, text: &str, start: usize, len: usize) -> Option<usize> {
+        let b = &text.as_bytes()[start..start + len];
+        let mut i = self.resume_at.saturating_sub(start);
+        if i > len {
+            return None;
+        }
 
         while i < b.len() {
             // Tera tags are recognized even inside TOML strings: their own
@@ -146,23 +151,18 @@ impl Scanner {
                     State::TeraExpr | State::TeraStmt | State::TeraComment
                 )
             {
-                let statement = if matches!(state, State::TeraStmt) {
-                    let body = &line[i + width..];
-                    tera_tag_end(body, b"%}").map(|end| (trim_tera_tag(&body[..end - 2]), end))
-                } else {
-                    None
-                };
-                if self.raw {
-                    if let Some(("endraw", end)) = statement {
-                        self.raw = false;
-                        i += width + end;
-                        continue;
-                    }
-                } else if let Some(("raw", end)) = statement {
-                    self.raw = true;
+                let keyword: &[u8] = if self.raw { b"endraw" } else { b"raw" };
+                if matches!(state, State::TeraStmt)
+                    && let Some(end) = raw_tag_end(&text.as_bytes()[start + i + width..], keyword)
+                {
+                    self.raw = !self.raw;
                     i += width + end;
+                    self.resume_at = start + i;
+                    if i > len {
+                        return None;
+                    }
                     continue;
-                } else {
+                } else if !self.raw {
                     self.return_state = self.state;
                     self.state = state;
                     i += width;
@@ -277,6 +277,16 @@ impl Scanner {
         }
         run
     }
+}
+
+/// Match the body of a raw or endraw tag, including its closing delimiter.
+fn raw_tag_end(body: &[u8], keyword: &[u8]) -> Option<usize> {
+    let rest = body.strip_prefix(b"-").unwrap_or(body);
+    let rest = rest.trim_ascii_start().strip_prefix(keyword)?;
+    let rest = rest.trim_ascii_start();
+    let rest = rest.strip_prefix(b"-").unwrap_or(rest);
+    let rest = rest.strip_prefix(b"%}")?;
+    Some(body.len() - rest.len())
 }
 
 fn scan_tera_body(b: &[u8], mut i: usize, delim: &[u8], quote: &mut Option<u8>) -> Option<usize> {
@@ -475,6 +485,34 @@ mod tests {
         let head = r#"{% set label = 'it\'s %} # inside' %}"#;
         let text = format!("{head}\nkey = 1 # outside\n");
         assert_eq!(strip_toml_comments(&text), format!("{head}\nkey = 1 \n"));
+    }
+
+    #[test]
+    fn multiline_raw_tags_preserve_literal_text_and_strip_comments() {
+        let src = "x = '''{% raw\n%}{# literal{% endraw\n%}''' # {{ missing }}\n";
+        assert_eq!(
+            strip_toml_comments(src),
+            "x = '''{% raw\n%}{# literal{% endraw\n%}''' \n"
+        );
+        let src = "x = \"{%-\r\n raw \r\n-%}{# literal{%- endraw\r\n-%}\" # gone\r\n";
+        assert_eq!(
+            strip_toml_comments(src),
+            "x = \"{%-\r\n raw \r\n-%}{# literal{%- endraw\r\n-%}\" \n"
+        );
+    }
+
+    #[test]
+    fn invalid_raw_tags_do_not_toggle_raw_mode() {
+        let src = "{% --raw %}{# comment #}\nx = 1 # gone\n";
+        assert_eq!(
+            strip_toml_comments(src),
+            "{% --raw %}{# comment #}\nx = 1 \n"
+        );
+        let src = "x = '''{% raw %}{% endraw extra %}{# literal{% endraw %}''' # gone\n";
+        assert_eq!(
+            strip_toml_comments(src),
+            "x = '''{% raw %}{% endraw extra %}{# literal{% endraw %}''' \n"
+        );
     }
 
     #[test]
